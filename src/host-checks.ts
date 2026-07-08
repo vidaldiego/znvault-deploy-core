@@ -29,10 +29,11 @@ const HEALTH_CHECK_DEFAULTS = {
 export async function checkPluginVersions(
   host: string,
   port: number,
-  useTLS = false
+  useTLS = false,
+  pluginNamespace: string = 'payara'
 ): Promise<PluginVersionCheckResult> {
-  const pluginUrl = buildPluginUrl(host, port, useTLS);
-  const versionsUrl = pluginUrl.replace('/plugins/payara', '/plugins/versions');
+  const pluginUrl = buildPluginUrl(host, port, useTLS, pluginNamespace);
+  const versionsUrl = pluginUrl.replace(`/plugins/${pluginNamespace}`, '/plugins/versions');
 
   try {
     const data = await agentGet<PluginVersionsResponse>(versionsUrl, 10000);
@@ -55,10 +56,11 @@ export async function checkPluginVersions(
 export async function triggerPluginUpdate(
   host: string,
   port: number,
-  useTLS = false
+  useTLS = false,
+  pluginNamespace: string = 'payara'
 ): Promise<TriggerUpdateResult> {
-  const pluginUrl = buildPluginUrl(host, port, useTLS);
-  const updateUrl = pluginUrl.replace('/plugins/payara', '/plugins/update');
+  const pluginUrl = buildPluginUrl(host, port, useTLS, pluginNamespace);
+  const updateUrl = pluginUrl.replace(`/plugins/${pluginNamespace}`, '/plugins/update');
 
   try {
     // Import agentPost for TLS-aware POST
@@ -85,10 +87,11 @@ export async function checkHostReachable(
   host: string,
   port: number,
   onRetry?: (attempt: number, delay: number, error: string) => void,
-  useTLS = false
+  useTLS = false,
+  pluginNamespace: string = 'payara'
 ): Promise<PreflightResult> {
-  const pluginUrl = buildPluginUrl(host, port, useTLS);
-  const healthUrl = pluginUrl.replace('/plugins/payara', '/health');
+  const pluginUrl = buildPluginUrl(host, port, useTLS, pluginNamespace);
+  const healthUrl = pluginUrl.replace(`/plugins/${pluginNamespace}`, '/health');
 
   let lastError = '';
 
@@ -99,14 +102,14 @@ export async function checkHostReachable(
         plugins?: Array<{ name: string; version?: string; details?: { running?: boolean } }>;
       }>(healthUrl, 5000);
 
-      const payaraPlugin = health.plugins?.find(p => p.name === 'payara');
+      const matchedPlugin = health.plugins?.find(p => p.name === pluginNamespace);
 
       return {
         host,
         reachable: true,
         agentVersion: health.version,
-        pluginVersion: payaraPlugin?.version,
-        payaraRunning: payaraPlugin?.details?.running,
+        pluginVersion: matchedPlugin?.version,
+        pluginRunning: matchedPlugin?.details?.running,
       };
     } catch (err) {
       lastError = getErrorMessage(err);

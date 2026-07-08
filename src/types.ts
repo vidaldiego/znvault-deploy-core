@@ -483,7 +483,7 @@ export interface HostReachableResult {
  * Pre-flight check result for a host.
  *
  * Returned by `checkHostReachable` (host-checks.ts). Field names
- * (`pluginVersion`, `payaraRunning`) are named for the originating plugin's
+ * (`pluginVersion`, `pluginRunning`) are named for the originating plugin's
  * probe response shape but the type itself is deploy-generic — any
  * deployer plugin's agent exposes the same `/plugins/<id>` + `/health`
  * probe surface.
@@ -493,7 +493,7 @@ export interface PreflightResult {
   reachable: boolean;
   agentVersion?: string;
   pluginVersion?: string;
-  payaraRunning?: boolean;
+  pluginRunning?: boolean;
   error?: string;
 }
 

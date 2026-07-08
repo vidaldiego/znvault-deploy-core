@@ -358,7 +358,12 @@ export function resolveEndpoint(host: string, port: number): { host: string; por
   return override ? { host: override.host, port: override.port } : { host, port };
 }
 
-export function buildPluginUrl(host: string, defaultPort: number, useTLS = false): string {
+export function buildPluginUrl(
+  host: string,
+  defaultPort: number,
+  useTLS = false,
+  pluginNamespace: string = 'payara'
+): string {
   const override = endpointOverrides.get(host);
   if (override) {
     host = override.host;
@@ -377,11 +382,11 @@ export function buildPluginUrl(host: string, defaultPort: number, useTLS = false
 
     // If URL has a port explicitly set, use it; otherwise use defaultPort
     const effectivePort = url.port || String(defaultPort);
-    return `${url.protocol}//${url.hostname}:${effectivePort}/plugins/payara`;
+    return `${url.protocol}//${url.hostname}:${effectivePort}/plugins/${pluginNamespace}`;
   } catch {
     // Fallback for invalid URLs - just append port
     const withProtocol = trimmed.startsWith('http') ? trimmed : `${defaultProtocol}://${trimmed}`;
-    return `${withProtocol}:${defaultPort}/plugins/payara`;
+    return `${withProtocol}:${defaultPort}/plugins/${pluginNamespace}`;
   }
 }
 
@@ -389,12 +394,17 @@ export function buildPluginUrl(host: string, defaultPort: number, useTLS = false
  * Build plugin URL with automatic TLS detection
  * Uses HTTPS if TLS is configured, otherwise HTTP
  */
-export function buildPluginUrlAuto(host: string, httpPort: number, httpsPort: number): string {
+export function buildPluginUrlAuto(
+  host: string,
+  httpPort: number,
+  httpsPort: number,
+  pluginNamespace: string = 'payara'
+): string {
   const useTLS = globalTLSOptions.caCertPath !== undefined ||
                  globalTLSOptions.caCert !== undefined ||
                  !globalTLSOptions.verify;
   const port = useTLS ? httpsPort : httpPort;
-  return buildPluginUrl(host, port, useTLS);
+  return buildPluginUrl(host, port, useTLS, pluginNamespace);
 }
 
 /**
@@ -405,13 +415,15 @@ export function buildPluginUrlAuto(host: string, httpPort: number, httpsPort: nu
  * @param httpPort HTTP port (default: 9100)
  * @param httpsPort HTTPS port (default: 9443)
  * @param autoDetect If true, try HTTPS even without explicit TLS config
+ * @param pluginNamespace Plugin namespace segment for the `/plugins/<namespace>` URL (default: 'payara')
  * @returns Connection info with the working configuration
  */
 export async function probeHost(
   host: string,
   httpPort = 9100,
   httpsPort = 9443,
-  autoDetect = true
+  autoDetect = true,
+  pluginNamespace: string = 'payara'
 ): Promise<ConnectionInfo> {
   const tlsConfigured = globalTLSOptions.caCertPath !== undefined ||
                         globalTLSOptions.caCert !== undefined ||
@@ -419,7 +431,7 @@ export async function probeHost(
 
   // If TLS is explicitly configured, use it directly
   if (tlsConfigured) {
-    const pluginUrl = buildPluginUrl(host, httpsPort, true);
+    const pluginUrl = buildPluginUrl(host, httpsPort, true, pluginNamespace);
     return {
       host,
       tls: true,
@@ -432,7 +444,7 @@ export async function probeHost(
   // Try HTTPS first if auto-detect is enabled
   if (autoDetect) {
     try {
-      const httpsUrl = buildPluginUrl(host, httpsPort, true);
+      const httpsUrl = buildPluginUrl(host, httpsPort, true, pluginNamespace);
       // Quick probe with short timeout - try unverified first to see if HTTPS is available
       const probeOptions = getFetchOptions(`${httpsUrl}/status`, {
         method: 'GET',
@@ -469,7 +481,7 @@ export async function probeHost(
   }
 
   // Fall back to HTTP
-  const pluginUrl = buildPluginUrl(host, httpPort, false);
+  const pluginUrl = buildPluginUrl(host, httpPort, false, pluginNamespace);
   return {
     host,
     tls: false,
@@ -486,14 +498,15 @@ export async function probeHosts(
   hosts: string[],
   httpPort = 9100,
   httpsPort = 9443,
-  autoDetect = true
+  autoDetect = true,
+  pluginNamespace: string = 'payara'
 ): Promise<Map<string, ConnectionInfo>> {
   const results = new Map<string, ConnectionInfo>();
 
   const probeResults = await Promise.all(
     hosts.map(async (host) => {
       try {
-        const info = await probeHost(host, httpPort, httpsPort, autoDetect);
+        const info = await probeHost(host, httpPort, httpsPort, autoDetect, pluginNamespace);
         return { host, info };
       } catch {
         // Return HTTP fallback on error
@@ -504,7 +517,7 @@ export async function probeHosts(
             tls: false,
             verified: false,
             port: httpPort,
-            pluginUrl: buildPluginUrl(host, httpPort, false),
+            pluginUrl: buildPluginUrl(host, httpPort, false, pluginNamespace),
           },
         };
       }
