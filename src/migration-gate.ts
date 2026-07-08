@@ -63,9 +63,25 @@ export async function runMigrationPhase(
   ctx: CLIPluginContext,
   runPhase: RunPhaseFn,
   dryRunRender: DryRunRenderFn,
-  opts: { dryRun?: boolean; run?: boolean; skipReason?: MigrationSkipReason; integrityDirs?: string[] } = {},
+  opts: {
+    dryRun?: boolean;
+    run?: boolean;
+    skipReason?: MigrationSkipReason;
+    integrityDirs?: string[];
+    /**
+     * Plugin-specific wording for the skip-reason messages so the shared gate
+     * stays target-agnostic. Defaults preserve payara's exact original text
+     * (byte-identical for payara, which omits these). Archon (Plan 4) passes
+     * `artifact: 'build'` and a `postOnlyRecoveryHint` naming `archon deploy`.
+     */
+    labels?: { artifact?: string; postOnlyRecoveryHint?: string };
+  } = {},
 ): Promise<void> {
   if (!migration) return;
+
+  const artifact = opts.labels?.artifact ?? 'WAR';
+  const postOnlyRecoveryHint =
+    opts.labels?.postOnlyRecoveryHint ?? `payara deploy run ${configName} --post-only`;
 
   // Skip (with a reason-tagged line so incident logs are accurate).
   if (opts.run === false) {
@@ -75,9 +91,9 @@ export async function runMigrationPhase(
       const flag = r && r.kind === 'flag' ? r.flag : 'flag';
       msg = `[deploy] Skipping ${phase} schema migrations (${flag}).`;
     } else if (r.kind === 'scoped-subset') {
-      msg = `[deploy] Skipping ${phase} schema migrations: deploy scoped to a subset (other hosts still run the previous WAR). Run a full deploy or 'payara deploy run ${configName} --post-only' once all hosts are current.`;
+      msg = `[deploy] Skipping ${phase} schema migrations: deploy scoped to a subset (other hosts still run the previous ${artifact}). Run a full deploy or '${postOnlyRecoveryHint}' once all hosts are current.`;
     } else if (r.kind === 'partial-coverage') {
-      msg = `[deploy] Skipping ${phase} schema migrations: ${r.dropped.length} configured host(s) were not deployed (${r.dropped.join(', ')}) — they still run the previous WAR.`;
+      msg = `[deploy] Skipping ${phase} schema migrations: ${r.dropped.length} configured host(s) were not deployed (${r.dropped.join(', ')}) — they still run the previous ${artifact}.`;
     } else {
       msg = `[deploy] Skipping ${phase} schema migrations: rollout did not fully succeed.`;
     }
