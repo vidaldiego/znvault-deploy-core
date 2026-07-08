@@ -130,6 +130,16 @@ export {
 export { validateDeployConfig } from './deploy-config-validate.js';
 export type { ValidationReport } from './deploy-config-validate.js';
 
+// --- config-store ----------------------------------------------------------
+export {
+  loadDeployConfigs,
+  saveDeployConfigs,
+  getConfig,
+  configExists,
+  listConfigNames,
+} from './config-store.js';
+export type { ConfigStoreLocation } from './config-store.js';
+
 // --- config-file -----------------------------------------------------------
 export { loadConfigFromFile } from './config-file.js';
 
