@@ -107,6 +107,13 @@ export {
 } from './post-gate.js';
 export type { MigrationSkipReason } from './post-gate.js';
 
+// --- migration-gate ------------------------------------------------------
+export {
+  runMigrationPhase,
+  siblingIntegrityDirs,
+} from './migration-gate.js';
+export type { RunPhaseFn, DryRunRenderFn } from './migration-gate.js';
+
 // --- deploy-plan -----------------------------------------------------------
 export { resolveDeployPlan } from './deploy-plan.js';
 export type { DeployPlan, DeployFlags } from './deploy-plan.js';
