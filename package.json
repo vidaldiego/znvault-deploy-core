@@ -5,23 +5,55 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
-  "exports": { ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" } },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
   "scripts": {
-    "build": "tsc", "build:prod": "tsc --sourceMap false", "clean": "rm -rf dist",
-    "test": "vitest run", "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "build:prod": "tsc --sourceMap false",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
     "lint": "ESLINT_USE_FLAT_CONFIG=false eslint 'src/**/*.ts' 'test/**/*.ts'",
     "prepublishOnly": "npm run build:prod"
   },
-  "dependencies": { "@zincapp/znvault-migrate": "^1.0.0", "inquirer": "^13.2.1", "listr2": "^10.0.0" },
-  "peerDependencies": { "@zincapp/znvault-cli": ">=2.11.0" },
-  "peerDependenciesMeta": { "@zincapp/znvault-cli": { "optional": true } },
-  "devDependencies": {
-    "@types/node": "^25.0.10", "commander": "^14.0.2", "eslint": "^9.39.2",
-    "typescript": "^5.9.3", "vitest": "^4.0.17"
+  "dependencies": {
+    "@zincapp/znvault-migrate": "^1.0.0",
+    "inquirer": "^13.2.1",
+    "listr2": "^10.0.0"
   },
-  "engines": { "node": ">=18.0.0" },
-  "publishConfig": { "access": "public" },
-  "repository": { "type": "git", "url": "git+https://github.com/vidaldiego/znvault-deploy-core.git" },
+  "peerDependencies": {
+    "@zincapp/znvault-cli": ">=2.11.0"
+  },
+  "peerDependenciesMeta": {
+    "@zincapp/znvault-cli": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.10",
+    "@typescript-eslint/eslint-plugin": "^8.63.0",
+    "@typescript-eslint/parser": "^8.63.0",
+    "commander": "^14.0.2",
+    "eslint": "^9.39.2",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.17"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vidaldiego/znvault-deploy-core.git"
+  },
   "license": "MIT"
 }
