@@ -237,7 +237,11 @@ export async function agentPostWithStatus<T>(
 /**
  * Legacy agentPost for backwards compatibility (throws on non-2xx)
  */
-export async function agentPost<T>(url: string, body: unknown): Promise<T> {
+export async function agentPost<T>(
+  url: string,
+  body: unknown,
+  timeout = AGENT_TIMEOUT_MS,
+): Promise<T> {
   const options = getFetchOptions(url, {
     method: 'POST',
     headers: {
@@ -245,7 +249,7 @@ export async function agentPost<T>(url: string, body: unknown): Promise<T> {
       'Accept': 'application/json',
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(AGENT_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeout),
   });
   const response = await fetch(url, options);
   if (!response.ok) {
