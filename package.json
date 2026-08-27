@@ -1,6 +1,6 @@
 {
   "name": "@zincapp/znvault-deploy-core",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Target-agnostic deploy machinery (multi-class rollout, canary, HAProxy drain, SSH-CA tunnel, migration gating) for znvault deployer plugins",
   "type": "module",
   "main": "dist/index.js",
