@@ -31,6 +31,17 @@ export interface TLSOptions {
 }
 
 /**
+ * Per-request authorization for the agent's local control plane.
+ *
+ * Keep the token in memory only. Callers are responsible for loading it from
+ * a private file and must never put it in a URL, process argument, environment
+ * variable, log field, or persisted deploy configuration.
+ */
+export interface AgentRequestAuth {
+  bearerToken: string;
+}
+
+/**
  * Connection information for a host
  */
 export interface ConnectionInfo {
@@ -175,13 +186,34 @@ function getFetchOptions(url: string, baseOptions: RequestInit): RequestInit {
   return options;
 }
 
+function getAgentHeaders(
+  baseHeaders: Record<string, string>,
+  auth?: AgentRequestAuth
+): Record<string, string> {
+  if (!auth) return baseHeaders;
+
+  const token = auth.bearerToken;
+  if (token.length < 32 || /[\r\n]/.test(token)) {
+    throw new Error('Invalid agent control-plane bearer token');
+  }
+
+  return {
+    ...baseHeaders,
+    Authorization: `Bearer ${token}`,
+  };
+}
+
 /**
  * GET request to agent endpoint
  */
-export async function agentGet<T>(url: string, timeout = AGENT_TIMEOUT_MS): Promise<T> {
+export async function agentGet<T>(
+  url: string,
+  timeout = AGENT_TIMEOUT_MS,
+  auth?: AgentRequestAuth
+): Promise<T> {
   const options = getFetchOptions(url, {
     method: 'GET',
-    headers: { 'Accept': 'application/json' },
+    headers: getAgentHeaders({ 'Accept': 'application/json' }, auth),
     signal: AbortSignal.timeout(timeout),
   });
   const response = await fetch(url, options);
@@ -199,15 +231,16 @@ export async function agentGet<T>(url: string, timeout = AGENT_TIMEOUT_MS): Prom
 export async function agentPostWithStatus<T>(
   url: string,
   body: unknown,
-  timeout = DEPLOYMENT_TIMEOUT_MS
+  timeout = DEPLOYMENT_TIMEOUT_MS,
+  auth?: AgentRequestAuth
 ): Promise<AgentPostResult<T>> {
   try {
     const options = getFetchOptions(url, {
       method: 'POST',
-      headers: {
+      headers: getAgentHeaders({
         'Content-Type': 'application/json',
         'Accept': 'application/json',
-      },
+      }, auth),
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeout),
     });
@@ -241,13 +274,14 @@ export async function agentPost<T>(
   url: string,
   body: unknown,
   timeout = AGENT_TIMEOUT_MS,
+  auth?: AgentRequestAuth,
 ): Promise<T> {
   const options = getFetchOptions(url, {
     method: 'POST',
-    headers: {
+    headers: getAgentHeaders({
       'Content-Type': 'application/json',
       'Accept': 'application/json',
-    },
+    }, auth),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeout),
   });
@@ -274,7 +308,8 @@ export async function pollDeploymentStatus(
   pluginUrl: string,
   startedAfter: number,
   progress: ProgressCallback,
-  maxWaitMs = STATUS_POLL_MAX_WAIT_MS
+  maxWaitMs = STATUS_POLL_MAX_WAIT_MS,
+  auth?: AgentRequestAuth
 ): Promise<{ success: boolean; result?: DeployResult; error?: string }> {
   const pollStart = Date.now();
 
@@ -282,7 +317,8 @@ export async function pollDeploymentStatus(
     try {
       const status = await agentGet<DeploymentStatusResponse>(
         `${pluginUrl}/deploy/status`,
-        10000 // 10s timeout for status check
+        10000, // 10s timeout for status check
+        auth
       );
 
       // Check if deployment completed after our request started

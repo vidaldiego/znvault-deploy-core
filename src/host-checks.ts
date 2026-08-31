@@ -1,7 +1,11 @@
 // Path: src/host-checks.ts
 // Host reachability and plugin version checks
 
-import { buildPluginUrl, agentGet } from './http-client.js';
+import {
+  buildPluginUrl,
+  agentGet,
+  type AgentRequestAuth,
+} from './http-client.js';
 import { MAX_RETRIES, getRetryDelay } from './constants.js';
 import { getErrorMessage } from './utils/error.js';
 import type {
@@ -30,13 +34,14 @@ export async function checkPluginVersions(
   host: string,
   port: number,
   useTLS = false,
-  pluginNamespace: string = 'payara'
+  pluginNamespace: string = 'payara',
+  auth?: AgentRequestAuth
 ): Promise<PluginVersionCheckResult> {
   const pluginUrl = buildPluginUrl(host, port, useTLS, pluginNamespace);
   const versionsUrl = pluginUrl.replace(`/plugins/${pluginNamespace}`, '/plugins/versions');
 
   try {
-    const data = await agentGet<PluginVersionsResponse>(versionsUrl, 10000);
+    const data = await agentGet<PluginVersionsResponse>(versionsUrl, 10000, auth);
     return { success: true, response: data };
   } catch (err) {
     const message = getErrorMessage(err);
@@ -57,7 +62,8 @@ export async function triggerPluginUpdate(
   host: string,
   port: number,
   useTLS = false,
-  pluginNamespace: string = 'payara'
+  pluginNamespace: string = 'payara',
+  auth?: AgentRequestAuth
 ): Promise<TriggerUpdateResult> {
   const pluginUrl = buildPluginUrl(host, port, useTLS, pluginNamespace);
   const updateUrl = pluginUrl.replace(`/plugins/${pluginNamespace}`, '/plugins/update');
@@ -65,7 +71,7 @@ export async function triggerPluginUpdate(
   try {
     // Import agentPost for TLS-aware POST
     const { agentPost } = await import('./http-client.js');
-    const data = await agentPost<PluginUpdateResponse>(updateUrl, {});
+    const data = await agentPost<PluginUpdateResponse>(updateUrl, {}, undefined, auth);
     return { success: true, response: data };
   } catch (err) {
     const message = getErrorMessage(err);

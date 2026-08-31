@@ -211,6 +211,7 @@ export {
 } from './http-client.js';
 export type {
   TLSOptions,
+  AgentRequestAuth,
   ConnectionInfo,
   ProgressCallback,
 } from './http-client.js';

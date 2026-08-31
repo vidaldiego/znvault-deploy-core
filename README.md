@@ -18,7 +18,7 @@ payara-specific.
 | **Migration gate** | `runMigrationPhase` (parameterized over a plugin-supplied `runPhase` callback) |
 | **Quiesce** | `quiesceScheduler`, `resumeScheduler`, `schedulerStatus`, `pollUntilDrained` |
 | **Config store** | `loadDeployConfigs`, `saveDeployConfigs`, `getConfig`, `validateDeployConfig`, `resolveClass`, `partitionSelectedClasses` |
-| **Agent HTTP client** | `agentGet`, `agentPost`, `buildPluginUrl`, `setEndpointOverride`, `pollDeploymentStatus`, TLS helpers |
+| **Agent HTTP client** | `agentGet`, `agentPost`, `buildPluginUrl`, `setEndpointOverride`, `pollDeploymentStatus`, per-request Bearer auth, TLS helpers |
 | **Coverage/gates** | `computeNoFailures`, `computeFullCoverage`, `isScopedDeploy` |
 | **Output** | `UnifiedProgress`, `formatSize`, `formatDuration`, `progressBar`, … |
 
@@ -34,6 +34,19 @@ Consumed as a library by a plugin, not run directly:
 import { executeStrategy, drainServer, performHealthCheck, runMigrationPhase }
   from '@zincapp/znvault-deploy-core';
 ```
+
+Agent control-plane credentials are passed per request so concurrent hosts can
+use distinct tokens without global mutable state:
+
+```ts
+const auth = { bearerToken: tokenLoadedFromPrivateFile };
+await agentGet(`${pluginUrl}/status`, 10_000, auth);
+await agentPost(`${pluginUrl}/restart`, {}, 120_000, auth);
+```
+
+The library never loads, persists, or logs the token. Callers must read it from
+a private local file and keep the value out of command arguments, environment
+variables, URLs, deploy configuration, and diagnostics.
 
 ## Development
 

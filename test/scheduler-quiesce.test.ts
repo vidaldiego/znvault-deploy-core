@@ -33,6 +33,7 @@ import * as httpClient from '../src/http-client.js';
 
 const HOST = '172.16.220.10';
 const PORT = 9100;
+const AUTH = { bearerToken: 'b'.repeat(43) };
 
 describe('quiesceScheduler', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -47,6 +48,22 @@ describe('quiesceScheduler', () => {
     const result = await quiesceScheduler(HOST, PORT);
 
     expect(result).toEqual({ available: true, inFlightUnits: 3 });
+  });
+
+  it('passes per-host authorization to the quiesce request', async () => {
+    vi.mocked(httpClient.agentPost).mockResolvedValue({
+      quiesced: true,
+      inFlightUnits: 0,
+    });
+
+    await quiesceScheduler(HOST, PORT, false, AUTH);
+
+    expect(httpClient.agentPost).toHaveBeenCalledWith(
+      `http://${HOST}:${PORT}/scheduler/quiesce`,
+      {},
+      undefined,
+      AUTH,
+    );
   });
 
   it('returns available:false when agent reports available:false (old znapi)', async () => {
@@ -92,6 +109,21 @@ describe('schedulerStatus', () => {
     expect(result).toEqual({ available: true, quiesced: true, inFlightUnits: 5 });
   });
 
+  it('passes per-host authorization to status', async () => {
+    vi.mocked(httpClient.agentGet).mockResolvedValue({
+      quiesced: true,
+      inFlightUnits: 0,
+    });
+
+    await schedulerStatus(HOST, PORT, false, AUTH);
+
+    expect(httpClient.agentGet).toHaveBeenCalledWith(
+      `http://${HOST}:${PORT}/scheduler/status`,
+      undefined,
+      AUTH,
+    );
+  });
+
   it('returns available:false when agent reports available:false', async () => {
     vi.mocked(httpClient.agentGet).mockResolvedValue({
       available: false,
@@ -119,6 +151,19 @@ describe('resumeScheduler', () => {
     vi.mocked(httpClient.agentPost).mockResolvedValue({ quiesced: false });
 
     await expect(resumeScheduler(HOST, PORT)).resolves.toBeUndefined();
+  });
+
+  it('passes per-host authorization to resume', async () => {
+    vi.mocked(httpClient.agentPost).mockResolvedValue({ quiesced: false });
+
+    await resumeScheduler(HOST, PORT, false, AUTH);
+
+    expect(httpClient.agentPost).toHaveBeenCalledWith(
+      `http://${HOST}:${PORT}/scheduler/resume`,
+      {},
+      undefined,
+      AUTH,
+    );
   });
 
   it('swallows agent errors (no throw)', async () => {

@@ -1,6 +1,6 @@
 {
   "name": "@zincapp/znvault-deploy-core",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Target-agnostic deploy machinery (multi-class rollout, canary, HAProxy drain, SSH-CA tunnel, migration gating) for znvault deployer plugins",
   "type": "module",
   "main": "dist/index.js",
@@ -16,7 +16,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "build:prod": "tsc --sourceMap false",
+    "build:prod": "npm run clean && tsc --sourceMap false --declarationMap false",
     "clean": "rm -rf dist",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

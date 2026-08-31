@@ -16,8 +16,29 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      make_latest: ${{ steps.release-channel.outputs.make_latest }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify immutable release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != v* ]]; then
+            echo "Publishing requires an exact v* tag ref" >&2
+            exit 1
+          fi
+          tag_version="${GITHUB_REF_NAME#v}"
+          package_version="$(node -p "require('./package.json').version")"
+          lock_version="$(node -p "require('./package-lock.json').version")"
+          lock_root_version="$(node -p "require('./package-lock.json').packages[''].version")"
+          if [[ "${tag_version}" != "${package_version}" \
+             || "${package_version}" != "${lock_version}" \
+             || "${package_version}" != "${lock_root_version}" ]]; then
+            echo "Tag/package/lock version mismatch" >&2
+            exit 1
+          fi
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -45,12 +66,33 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Select fenced release channel
+        id: release-channel
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(node -p "require('./package.json').version")"
+          case "${package_version}" in
+            0.2.*)
+              echo "dist_tag=dr-m4" >> "${GITHUB_OUTPUT}"
+              echo "make_latest=false" >> "${GITHUB_OUTPUT}"
+              ;;
+            *-*)
+              echo "dist_tag=next" >> "${GITHUB_OUTPUT}"
+              echo "make_latest=false" >> "${GITHUB_OUTPUT}"
+              ;;
+            *)
+              echo "dist_tag=latest" >> "${GITHUB_OUTPUT}"
+              echo "make_latest=true" >> "${GITHUB_OUTPUT}"
+              ;;
+          esac
+
       - name: Publish to npm (Trusted Publishing via OIDC)
         # --loglevel=verbose forces npm to dump the full HTTP response
         # body from the registry on failure. With Trusted Publishing,
         # npm.com's 404 responses include a JSON body explaining which
         # OIDC claim failed to match the configured publisher.
-        run: npm publish --access public --provenance --loglevel=verbose
+        run: npm publish --access public --provenance --tag "${{ steps.release-channel.outputs.dist_tag }}" --loglevel=verbose
 
   github-release:
     needs: publish
@@ -63,3 +105,4 @@ jobs:
         with:
           generate_release_notes: true
           draft: false
+          make_latest: ${{ needs.publish.outputs.make_latest }}

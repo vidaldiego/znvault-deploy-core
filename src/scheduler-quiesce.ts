@@ -10,7 +10,12 @@
 // "quiesce UNAVAILABLE — caller should proceed without quiescing".
 // They NEVER throw for operational failures; they return a typed result.
 
-import { agentGet, agentPost, resolveEndpoint } from './http-client.js';
+import {
+  agentGet,
+  agentPost,
+  resolveEndpoint,
+  type AgentRequestAuth,
+} from './http-client.js';
 
 // ---------------------------------------------------------------------------
 // Default config values
@@ -130,10 +135,11 @@ export async function quiesceScheduler(
   host: string,
   port: number,
   useTLS = false,
+  auth?: AgentRequestAuth,
 ): Promise<QuiesceResult> {
   const url = `${buildAgentBaseUrl(host, port, useTLS)}/scheduler/quiesce`;
   try {
-    const body = await agentPost<AgentQuiesceResponse>(url, {});
+    const body = await agentPost<AgentQuiesceResponse>(url, {}, undefined, auth);
 
     // Agent proxied an old znapi: { available: false, reason: '...' }
     if (body.available === false) {
@@ -166,10 +172,11 @@ export async function schedulerStatus(
   host: string,
   port: number,
   useTLS = false,
+  auth?: AgentRequestAuth,
 ): Promise<StatusResult> {
   const url = `${buildAgentBaseUrl(host, port, useTLS)}/scheduler/status`;
   try {
-    const body = await agentGet<AgentQuiesceResponse>(url);
+    const body = await agentGet<AgentQuiesceResponse>(url, undefined, auth);
 
     if (body.available === false) {
       return { available: false, reason: body.reason };
@@ -200,10 +207,11 @@ export async function resumeScheduler(
   host: string,
   port: number,
   useTLS = false,
+  auth?: AgentRequestAuth,
 ): Promise<void> {
   const url = `${buildAgentBaseUrl(host, port, useTLS)}/scheduler/resume`;
   try {
-    await agentPost<AgentQuiesceResponse>(url, {});
+    await agentPost<AgentQuiesceResponse>(url, {}, undefined, auth);
   } catch (err) {
     // Intentionally swallowed — auto-resume is the backstop.
     console.warn(`[scheduler-quiesce] resume failed for ${host}:${port} — relying on auto-resume backstop: ${err}`);
@@ -229,6 +237,7 @@ export async function pollUntilDrained(
   port: number,
   opts: { pollMs?: number; timeoutMs?: number },
   useTLS = false,
+  auth?: AgentRequestAuth,
 ): Promise<PollResult> {
   const pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS;
@@ -236,7 +245,7 @@ export async function pollUntilDrained(
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
-    const status = await schedulerStatus(host, port, useTLS);
+    const status = await schedulerStatus(host, port, useTLS, auth);
 
     if (!status.available) {
       // Agent or znapi unavailable mid-poll — caller proceeds.
