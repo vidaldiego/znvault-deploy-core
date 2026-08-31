@@ -194,6 +194,7 @@ export type {
 export {
   configureTLS,
   getTLSConfig,
+  agentFetch,
   agentGet,
   agentPostWithStatus,
   agentPost,

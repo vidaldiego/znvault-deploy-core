@@ -9,14 +9,8 @@ import {
   STATUS_POLL_MAX_WAIT_MS,
 } from './constants.js';
 import { getErrorMessage } from './utils/error.js';
-import { createRequire } from 'node:module';
-
-// ESM-safe synchronous require, used only for the optional `undici` dispatcher
-// below (kept sync + try/catch so a missing undici degrades gracefully rather
-// than failing at module load).
-const nodeRequire = createRequire(import.meta.url);
 import { readFileSync } from 'node:fs';
-import { Agent as HttpsAgent } from 'node:https';
+import { Agent as UndiciAgent } from 'undici';
 
 /**
  * TLS configuration for HTTPS connections
@@ -65,9 +59,17 @@ export interface ConnectionInfo {
 let globalTLSOptions: TLSOptions = { verify: true };
 
 /**
- * Cached HTTPS agent for reuse across requests
+ * Cached Undici dispatcher for reuse across requests
  */
-let cachedHttpsAgent: HttpsAgent | null = null;
+let cachedUndiciAgent: { key: string; agent: UndiciAgent } | null = null;
+
+function clearCachedUndiciAgent(): void {
+  const cached = cachedUndiciAgent;
+  cachedUndiciAgent = null;
+  if (cached) {
+    void cached.agent.destroy().catch(() => undefined);
+  }
+}
 
 /**
  * Configure TLS options for all HTTPS requests.
@@ -75,8 +77,7 @@ let cachedHttpsAgent: HttpsAgent | null = null;
  */
 export function configureTLS(options: TLSOptions): void {
   globalTLSOptions = { ...globalTLSOptions, ...options };
-  // Invalidate cached agent when options change
-  cachedHttpsAgent = null;
+  clearCachedUndiciAgent();
 }
 
 /**
@@ -87,53 +88,49 @@ export function getTLSConfig(): Readonly<TLSOptions> {
 }
 
 /**
- * Get or create a cached HTTPS agent with current TLS options
+ * Get or create a cached Undici dispatcher for the requested TLS policy.
  */
-function getHttpsAgent(): HttpsAgent | undefined {
-  // Only create agent if we have custom TLS options
-  const needsCustomAgent = !globalTLSOptions.verify ||
-    globalTLSOptions.caCertPath !== undefined ||
-    globalTLSOptions.caCert !== undefined;
+function getUndiciAgent(tlsOptions: TLSOptions): UndiciAgent | undefined {
+  const needsCustomAgent = tlsOptions.verify === false ||
+    tlsOptions.caCertPath !== undefined ||
+    tlsOptions.caCert !== undefined;
 
   if (!needsCustomAgent) {
     return undefined;
   }
 
-  if (cachedHttpsAgent) {
-    return cachedHttpsAgent;
+  const ca = tlsOptions.caCert ??
+    (tlsOptions.caCertPath ? readFileSync(tlsOptions.caCertPath, 'utf-8') : undefined);
+  const key = JSON.stringify([tlsOptions.verify !== false, ca]);
+  if (cachedUndiciAgent?.key === key) {
+    return cachedUndiciAgent.agent;
   }
 
-  const agentOptions: {
-    rejectUnauthorized?: boolean;
-    ca?: string;
-  } = {};
-
-  if (!globalTLSOptions.verify) {
-    agentOptions.rejectUnauthorized = false;
-  }
-
-  if (globalTLSOptions.caCertPath || globalTLSOptions.caCert) {
-    const ca = globalTLSOptions.caCert ??
-      (globalTLSOptions.caCertPath ? readFileSync(globalTLSOptions.caCertPath, 'utf-8') : undefined);
-    if (ca) {
-      agentOptions.ca = ca;
-    }
-  }
-
-  cachedHttpsAgent = new HttpsAgent(agentOptions);
-  return cachedHttpsAgent;
+  clearCachedUndiciAgent();
+  const agent = new UndiciAgent({
+    connect: {
+      rejectUnauthorized: tlsOptions.verify !== false,
+      ...(ca ? { ca } : {}),
+    },
+  });
+  cachedUndiciAgent = { key, agent };
+  return agent;
 }
 
 /**
  * Get fetch options with TLS configuration for HTTPS URLs
  */
-function getFetchOptions(url: string, baseOptions: RequestInit): RequestInit {
+function getFetchOptions(
+  url: string,
+  baseOptions: RequestInit,
+  tlsOptions: TLSOptions = globalTLSOptions,
+): RequestInit {
   // Only apply TLS options for HTTPS URLs
   if (!url.startsWith('https://')) {
     return baseOptions;
   }
 
-  const options: RequestInit & { dispatcher?: unknown; agent?: HttpsAgent } = { ...baseOptions };
+  const options: RequestInit = { ...baseOptions };
 
   // Note: Node.js native fetch doesn't support custom TLS options directly.
   // We use undici's dispatcher option which is compatible with Node 18+
@@ -141,11 +138,11 @@ function getFetchOptions(url: string, baseOptions: RequestInit): RequestInit {
   // For Bun runtime, TLS options are handled differently
   if (typeof process !== 'undefined' && process.versions?.bun) {
     // Bun uses native TLS options
-    if (!globalTLSOptions.verify) {
+    if (tlsOptions.verify === false) {
       (options as Record<string, unknown>).tls = { rejectUnauthorized: false };
-    } else if (globalTLSOptions.caCertPath || globalTLSOptions.caCert) {
-      const ca = globalTLSOptions.caCert ??
-        (globalTLSOptions.caCertPath ? readFileSync(globalTLSOptions.caCertPath, 'utf-8') : undefined);
+    } else if (tlsOptions.caCertPath || tlsOptions.caCert) {
+      const ca = tlsOptions.caCert ??
+        (tlsOptions.caCertPath ? readFileSync(tlsOptions.caCertPath, 'utf-8') : undefined);
       if (ca) {
         (options as Record<string, unknown>).tls = { ca };
       }
@@ -153,54 +150,93 @@ function getFetchOptions(url: string, baseOptions: RequestInit): RequestInit {
     return options;
   }
 
-  // For Node.js, try undici dispatcher first (best approach for native fetch)
-  try {
-    // Synchronous require (via createRequire) to avoid issues if undici is not available
-    const { Agent } = nodeRequire('undici') as { Agent: new (options: Record<string, unknown>) => unknown };
-    const agentOptions: Record<string, unknown> = {};
-
-    if (!globalTLSOptions.verify) {
-      agentOptions.connect = { rejectUnauthorized: false };
-    } else if (globalTLSOptions.caCertPath || globalTLSOptions.caCert) {
-      const ca = globalTLSOptions.caCert ??
-        (globalTLSOptions.caCertPath ? readFileSync(globalTLSOptions.caCertPath, 'utf-8') : undefined);
-      if (ca) {
-        agentOptions.connect = { ca };
-      }
-    }
-
-    if (Object.keys(agentOptions).length > 0) {
-      options.dispatcher = new Agent(agentOptions) as RequestInit['dispatcher'];
-    }
-  } catch {
-    // undici not available - use node:https Agent
-    // This works with node-fetch but may not work with native fetch in all cases
-    const agent = getHttpsAgent();
-    if (agent) {
-      // Note: This only works if the fetch implementation supports 'agent' option
-      // Native fetch in Node.js requires undici dispatcher
-      (options as Record<string, unknown>).agent = agent;
-    }
+  const dispatcher = getUndiciAgent(tlsOptions);
+  if (dispatcher) {
+    // @types/node models fetch with its bundled undici-types package while
+    // runtime `undici` publishes the same Dispatcher contract from another
+    // module identity. Native fetch accepts the external dispatcher.
+    (options as Record<string, unknown>).dispatcher = dispatcher;
   }
 
   return options;
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  return normalized === 'localhost'
+    || normalized === '::1'
+    || /^127(?:\.\d{1,3}){3}$/.test(normalized)
+    // WHATWG URL canonicalizes ::ffff:127.x.x.x to ::ffff:7fxx:xxxx.
+    || /^::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}$/.test(normalized);
+}
+
+function assertAuthenticatedTransport(url: string): void {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(
+      'Refusing to send an agent control-plane token over a non-HTTP transport'
+    );
+  }
+  if (isLoopbackHostname(parsed.hostname)) return;
+
+  if (parsed.protocol !== 'https:') {
+    throw new Error(
+      'Refusing to send an agent control-plane token over non-loopback HTTP'
+    );
+  }
+  if (globalTLSOptions.verify === false) {
+    throw new Error(
+      'Refusing to send an agent control-plane token with TLS verification disabled'
+    );
+  }
+}
+
 function getAgentHeaders(
-  baseHeaders: Record<string, string>,
+  url: string,
+  baseHeaders: RequestInit['headers'],
   auth?: AgentRequestAuth
-): Record<string, string> {
-  if (!auth) return baseHeaders;
+): Headers {
+  const headers = new Headers(baseHeaders);
+  if (headers.has('Authorization')) {
+    throw new Error(
+      'Agent control-plane authorization must be supplied through AgentRequestAuth'
+    );
+  }
+  if (!auth) return headers;
 
   const token = auth.bearerToken;
   if (token.length < 32 || /[\r\n]/.test(token)) {
     throw new Error('Invalid agent control-plane bearer token');
   }
 
-  return {
-    ...baseHeaders,
-    Authorization: `Bearer ${token}`,
-  };
+  assertAuthenticatedTransport(url);
+  headers.set('Authorization', `Bearer ${token}`);
+  return headers;
+}
+
+/**
+ * Fetch an agent endpoint with the same TLS and per-request authorization
+ * policy as the JSON helpers. This is the safe path for binary WAR uploads.
+ */
+export async function agentFetch(
+  url: string,
+  init: RequestInit,
+  auth?: AgentRequestAuth
+): Promise<Response> {
+  const unsafeInit = init as RequestInit & { dispatcher?: unknown; agent?: unknown };
+  if (Object.prototype.hasOwnProperty.call(unsafeInit, 'dispatcher') ||
+      Object.prototype.hasOwnProperty.call(unsafeInit, 'agent')) {
+    throw new Error('Caller-supplied TLS dispatchers are not allowed for agent requests');
+  }
+
+  const options = getFetchOptions(url, {
+    method: init.method,
+    headers: getAgentHeaders(url, init.headers, auth),
+    body: init.body,
+    signal: init.signal,
+    redirect: 'error',
+  });
+  return fetch(url, options);
 }
 
 /**
@@ -213,8 +249,9 @@ export async function agentGet<T>(
 ): Promise<T> {
   const options = getFetchOptions(url, {
     method: 'GET',
-    headers: getAgentHeaders({ 'Accept': 'application/json' }, auth),
+    headers: getAgentHeaders(url, { 'Accept': 'application/json' }, auth),
     signal: AbortSignal.timeout(timeout),
+    redirect: 'error',
   });
   const response = await fetch(url, options);
   if (!response.ok) {
@@ -237,12 +274,13 @@ export async function agentPostWithStatus<T>(
   try {
     const options = getFetchOptions(url, {
       method: 'POST',
-      headers: getAgentHeaders({
+      headers: getAgentHeaders(url, {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
       }, auth),
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(timeout),
+      redirect: 'error',
     });
     const response = await fetch(url, options);
 
@@ -278,12 +316,13 @@ export async function agentPost<T>(
 ): Promise<T> {
   const options = getFetchOptions(url, {
     method: 'POST',
-    headers: getAgentHeaders({
+    headers: getAgentHeaders(url, {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
     }, auth),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(timeout),
+    redirect: 'error',
   });
   const response = await fetch(url, options);
   if (!response.ok) {
@@ -489,12 +528,7 @@ export async function probeHost(
       const probeOptions = getFetchOptions(`${httpsUrl}/status`, {
         method: 'GET',
         signal: AbortSignal.timeout(3000),
-      });
-
-      // Temporarily allow unverified for probe
-      const originalVerify = globalTLSOptions.verify;
-      globalTLSOptions.verify = false;
-      cachedHttpsAgent = null;
+      }, { ...globalTLSOptions, verify: false });
 
       try {
         const response = await fetch(`${httpsUrl}/status`, probeOptions);
@@ -510,10 +544,6 @@ export async function probeHost(
         }
       } catch {
         // HTTPS probe failed - fall through to HTTP
-      } finally {
-        // Restore original verify setting
-        globalTLSOptions.verify = originalVerify;
-        cachedHttpsAgent = null;
       }
     } catch {
       // HTTPS not available, fall through to HTTP

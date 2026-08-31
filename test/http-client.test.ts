@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  agentFetch,
   agentGet,
   agentPost,
   agentPostWithStatus,
+  configureTLS,
   pollDeploymentStatus,
 } from '../src/http-client.js';
 
@@ -11,6 +13,7 @@ const AUTH = { bearerToken: 'a'.repeat(43) };
 
 describe('agentPost', () => {
   afterEach(() => {
+    configureTLS({ verify: true, caCert: undefined, caCertPath: undefined });
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -44,15 +47,11 @@ describe('agentPost', () => {
 
     await agentPost('http://127.0.0.1/restart', {}, 30_000, AUTH);
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      'http://127.0.0.1/restart',
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: `Bearer ${AUTH.bearerToken}`,
-        }),
-        body: '{}',
-      }),
-    );
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('http://127.0.0.1/restart');
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ body: '{}' });
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Authorization'))
+      .toBe(`Bearer ${AUTH.bearerToken}`);
+    expect(fetchMock.mock.calls[0]?.[1]?.redirect).toBe('error');
   });
 
   it('rejects malformed bearer tokens before dispatch', async () => {
@@ -75,9 +74,8 @@ describe('agentPost', () => {
     await expect(
       agentPostWithStatus('http://127.0.0.1/deploy/chunk', {}, 30_000, AUTH),
     ).resolves.toEqual({ ok: true, data: { committed: true } });
-    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({
-      Authorization: `Bearer ${AUTH.bearerToken}`,
-    });
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Authorization'))
+      .toBe(`Bearer ${AUTH.bearerToken}`);
   });
 
   it('retains bearer authorization while polling deployment status', async () => {
@@ -100,9 +98,8 @@ describe('agentPost', () => {
     );
 
     expect(result.success).toBe(true);
-    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({
-      Authorization: `Bearer ${AUTH.bearerToken}`,
-    });
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Authorization'))
+      .toBe(`Bearer ${AUTH.bearerToken}`);
   });
 
   it('does not cross per-host credentials during concurrent requests', async () => {
@@ -115,16 +112,101 @@ describe('agentPost', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await Promise.all([
-      agentGet('http://host-a.test/status', 30_000, authA),
-      agentGet('http://host-b.test/status', 30_000, authB),
+      agentGet('https://host-a.test/status', 30_000, authA),
+      agentGet('https://host-b.test/status', 30_000, authB),
     ]);
 
     const calls = new Map(fetchMock.mock.calls.map(([url, options]) => [url, options]));
-    expect(calls.get('http://host-a.test/status')?.headers).toMatchObject({
-      Authorization: `Bearer ${authA.bearerToken}`,
+    expect(new Headers(calls.get('https://host-a.test/status')?.headers).get('Authorization'))
+      .toBe(`Bearer ${authA.bearerToken}`);
+    expect(new Headers(calls.get('https://host-b.test/status')?.headers).get('Authorization'))
+      .toBe(`Bearer ${authB.bearerToken}`);
+  });
+
+  it('refuses to send credentials over remote HTTP or unverified HTTPS', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(agentGet('http://host.test/status', 30_000, AUTH)).rejects.toThrow(
+      'non-loopback HTTP'
+    );
+
+    configureTLS({ verify: false });
+    await expect(agentGet('https://host.test/status', 30_000, AUTH)).rejects.toThrow(
+      'TLS verification disabled'
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('uses the same auth and transport policy for binary uploads', async () => {
+    const body = Buffer.from('war-bytes');
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await agentFetch(
+      'http://[::1]:9100/plugins/payara/deploy/upload',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body,
+      },
+      AUTH,
+    );
+
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBe(body);
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Authorization'))
+      .toBe(`Bearer ${AUTH.bearerToken}`);
+  });
+
+  it('recognizes URL-canonicalized IPv4-mapped IPv6 loopback', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ healthy: true }),
     });
-    expect(calls.get('http://host-b.test/status')?.headers).toMatchObject({
-      Authorization: `Bearer ${authB.bearerToken}`,
+    vi.stubGlobal('fetch', fetchMock);
+
+    await agentGet('http://[::ffff:127.0.0.2]:9100/health', 30_000, AUTH);
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Authorization'))
+      .toBe(`Bearer ${AUTH.bearerToken}`);
+  });
+
+  it('rejects non-HTTP transports and caller-injected authorization', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(agentFetch('ftp://localhost/upload', {}, AUTH)).rejects.toThrow(
+      'non-HTTP transport'
+    );
+    await expect(agentFetch(
+      'https://host.test/upload',
+      { headers: { Authorization: `Bearer ${AUTH.bearerToken}` } },
+    )).rejects.toThrow('must be supplied through AgentRequestAuth');
+    await expect(agentFetch(
+      'https://host.test/upload',
+      { dispatcher: { connect: { rejectUnauthorized: false } } } as RequestInit,
+      AUTH,
+    )).rejects.toThrow('TLS dispatchers are not allowed');
+    await expect(agentFetch(
+      'https://host.test/upload',
+      { agent: { rejectUnauthorized: false } } as RequestInit,
+      AUTH,
+    )).rejects.toThrow('TLS dispatchers are not allowed');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('installs a controlled Undici dispatcher for a custom CA', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ healthy: true }),
     });
+    vi.stubGlobal('fetch', fetchMock);
+    configureTLS({ verify: true, caCert: 'test-ca', caCertPath: undefined });
+
+    await agentGet('https://host.test/status', 30_000, AUTH);
+
+    expect(fetchMock.mock.calls[0]?.[1]?.dispatcher).toBeDefined();
+    expect(fetchMock.mock.calls[0]?.[1]?.redirect).toBe('error');
   });
 });

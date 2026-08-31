@@ -19,6 +19,7 @@
     "build:prod": "npm run clean && tsc --sourceMap false --declarationMap false",
     "clean": "rm -rf dist",
     "test": "vitest run",
+    "test:packed": "node test/release/packed-consumer.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "ESLINT_USE_FLAT_CONFIG=false eslint 'src/**/*.ts' 'test/**/*.ts'",
     "prepublishOnly": "npm run build:prod"
@@ -26,7 +27,8 @@
   "dependencies": {
     "@zincapp/znvault-migrate": "^1.0.0",
     "inquirer": "^13.2.1",
-    "listr2": "^10.0.0"
+    "listr2": "^10.0.0",
+    "undici": "^6.28.0"
   },
   "peerDependencies": {
     "@zincapp/znvault-cli": ">=2.11.0"

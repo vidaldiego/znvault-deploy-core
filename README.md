@@ -18,7 +18,7 @@ payara-specific.
 | **Migration gate** | `runMigrationPhase` (parameterized over a plugin-supplied `runPhase` callback) |
 | **Quiesce** | `quiesceScheduler`, `resumeScheduler`, `schedulerStatus`, `pollUntilDrained` |
 | **Config store** | `loadDeployConfigs`, `saveDeployConfigs`, `getConfig`, `validateDeployConfig`, `resolveClass`, `partitionSelectedClasses` |
-| **Agent HTTP client** | `agentGet`, `agentPost`, `buildPluginUrl`, `setEndpointOverride`, `pollDeploymentStatus`, per-request Bearer auth, TLS helpers |
+| **Agent HTTP client** | `agentFetch`, `agentGet`, `agentPost`, `buildPluginUrl`, `setEndpointOverride`, `pollDeploymentStatus`, per-request Bearer auth, TLS helpers |
 | **Coverage/gates** | `computeNoFailures`, `computeFullCoverage`, `isScopedDeploy` |
 | **Output** | `UnifiedProgress`, `formatSize`, `formatDuration`, `progressBar`, … |
 
@@ -46,7 +46,9 @@ await agentPost(`${pluginUrl}/restart`, {}, 120_000, auth);
 
 The library never loads, persists, or logs the token. Callers must read it from
 a private local file and keep the value out of command arguments, environment
-variables, URLs, deploy configuration, and diagnostics.
+variables, URLs, deploy configuration, and diagnostics. Authenticated requests
+are rejected unless they use loopback (including an SSH local forward) or
+verified HTTPS; `verify: false` can never carry a control-plane credential.
 
 ## Development
 
