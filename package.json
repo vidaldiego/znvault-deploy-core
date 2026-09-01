@@ -1,6 +1,6 @@
 {
   "name": "@zincapp/znvault-deploy-core",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Target-agnostic deploy machinery (multi-class rollout, canary, HAProxy drain, SSH-CA tunnel, migration gating) for znvault deployer plugins",
   "type": "module",
   "main": "dist/index.js",
@@ -31,7 +31,7 @@
     "undici": "^6.28.0"
   },
   "peerDependencies": {
-    "@zincapp/znvault-cli": ">=2.11.0"
+    "@zincapp/znvault-cli": ">=4.5.0"
   },
   "peerDependenciesMeta": {
     "@zincapp/znvault-cli": {

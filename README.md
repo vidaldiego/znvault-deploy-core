@@ -58,5 +58,8 @@ npm run build     # tsc → dist/
 npm test
 ```
 
-Requires Node ≥ 20. Publishes to npm with provenance via OIDC trusted
-publishing on a `v*` tag push.
+Requires Node ≥ 20. SSH-CA tunnel support shells out to `znvault ssh forward`,
+so consumers need `@zincapp/znvault-cli` ≥ 4.5.0 (declared as an optional
+peer because non-tunnel consumers can inject or avoid that capability).
+Publishes to npm with provenance via OIDC trusted publishing on a `v*` tag
+push.

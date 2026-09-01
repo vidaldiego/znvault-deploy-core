@@ -3,6 +3,7 @@
 
 import {
   buildPluginUrl,
+  agentFetch,
   agentGet,
   type AgentRequestAuth,
 } from './http-client.js';
@@ -26,6 +27,79 @@ const HEALTH_CHECK_DEFAULTS = {
   retries: 5,
   retryDelay: 3000,
 } as const;
+
+interface AgentHealthSnapshot {
+  status: 'healthy' | 'degraded' | 'unhealthy';
+  version: string;
+  plugins?: Array<{
+    name: string;
+    version?: string;
+    details?: { running?: boolean };
+  }>;
+}
+
+const VERSION_PATTERN = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Validate the small public `/health` surface used as compatibility evidence.
+ * A 503 is a valid transport response only when the body explicitly reports
+ * `unhealthy`; malformed/ambiguous snapshots fail closed.
+ */
+function parseAgentHealthSnapshot(value: unknown, httpStatus: number): AgentHealthSnapshot {
+  if (!isRecord(value)) {
+    throw new Error('Agent health snapshot is not a JSON object');
+  }
+
+  const status = value.status;
+  if (status !== 'healthy' && status !== 'degraded' && status !== 'unhealthy') {
+    throw new Error('Agent health snapshot has an unknown status');
+  }
+  if (typeof value.version !== 'string' || !VERSION_PATTERN.test(value.version)) {
+    throw new Error('Agent health snapshot has an unknown version');
+  }
+  if ((httpStatus === 503) !== (status === 'unhealthy')) {
+    throw new Error(`Agent health snapshot contradicts HTTP ${httpStatus}`);
+  }
+
+  let plugins: AgentHealthSnapshot['plugins'];
+  if (value.plugins !== undefined) {
+    if (!Array.isArray(value.plugins)) {
+      throw new Error('Agent health snapshot has an invalid plugins list');
+    }
+    plugins = value.plugins.map((plugin) => {
+      if (!isRecord(plugin) || typeof plugin.name !== 'string' || plugin.name.trim() === '') {
+        throw new Error('Agent health snapshot has an invalid plugin entry');
+      }
+      if (
+        plugin.version !== undefined
+        && (typeof plugin.version !== 'string' || !VERSION_PATTERN.test(plugin.version))
+      ) {
+        throw new Error(`Agent health snapshot has an invalid version for plugin '${plugin.name}'`);
+      }
+      if (plugin.details !== undefined && !isRecord(plugin.details)) {
+        throw new Error(`Agent health snapshot has invalid details for plugin '${plugin.name}'`);
+      }
+      const running = isRecord(plugin.details) && typeof plugin.details.running === 'boolean'
+        ? plugin.details.running
+        : undefined;
+      return {
+        name: plugin.name,
+        ...(plugin.version === undefined ? {} : { version: plugin.version }),
+        ...(running === undefined ? {} : { details: { running } }),
+      };
+    });
+  }
+
+  return {
+    status,
+    version: value.version,
+    ...(plugins === undefined ? {} : { plugins }),
+  };
+}
 
 /**
  * Check plugin versions on a host
@@ -103,16 +177,23 @@ export async function checkHostReachable(
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const health = await agentGet<{
-        version?: string;
-        plugins?: Array<{ name: string; version?: string; details?: { running?: boolean } }>;
-      }>(healthUrl, 5000);
+      const response = await agentFetch(healthUrl, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (response.status !== 200 && response.status !== 503) {
+        throw new Error(`Agent health request failed: HTTP ${response.status}`);
+      }
+      const health = parseAgentHealthSnapshot(await response.json(), response.status);
 
       const matchedPlugin = health.plugins?.find(p => p.name === pluginNamespace);
 
       return {
         host,
         reachable: true,
+        healthHttpStatus: response.status,
+        healthStatus: health.status,
         agentVersion: health.version,
         pluginVersion: matchedPlugin?.version,
         pluginRunning: matchedPlugin?.details?.running,

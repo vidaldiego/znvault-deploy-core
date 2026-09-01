@@ -90,7 +90,7 @@ export function validateDeployConfig(config: DeployConfig): ValidationReport {
 
   // ── Multi-class invariants ──
   if (hasClasses) {
-    if (config.hosts && config.hosts.length > 0) {
+    if (config.hosts !== undefined) {
       errors.push(`config '${config.name}' has both top-level hosts and classes — use one.`);
     }
     if (config.quiesce !== undefined || config.hostConfigs !== undefined) {
@@ -107,16 +107,26 @@ export function validateDeployConfig(config: DeployConfig): ValidationReport {
         seenNames.add(c.name);
       }
 
-      // No host in two classes
+      // Every physical host is unique, including within one class.
       const hostToClass = new Map<string, string>();
+      const duplicateHosts = new Set<string>();
       for (const c of classes) {
         for (const h of c.hosts) {
           const prev = hostToClass.get(h);
-          if (prev && prev !== c.name) {
-            errors.push(`host ${h} appears in two classes ('${prev}' and '${c.name}').`);
+          if (prev !== undefined && !duplicateHosts.has(h)) {
+            errors.push(
+              prev === c.name
+                ? `host ${h} appears more than once in class '${c.name}'.`
+                : `host ${h} appears in two classes ('${prev}' and '${c.name}').`,
+            );
+            duplicateHosts.add(h);
+          } else if (prev === undefined) {
+            hostToClass.set(h, c.name);
           }
-          hostToClass.set(h, c.name);
         }
+      }
+      if (hostToClass.size === 0) {
+        errors.push(`config '${config.name}' has no physical target hosts.`);
       }
 
       const warPaths: string[] = [];
@@ -159,6 +169,21 @@ export function validateDeployConfig(config: DeployConfig): ValidationReport {
       const uniqueWars = Array.from(new Set(warPaths));
       if (uniqueWars.length > 1) {
         info.push(`classes use ${uniqueWars.length} different WARs: ${uniqueWars.join(', ')}.`);
+      }
+    }
+  } else {
+    const hosts = config.hosts ?? [];
+    if (hosts.length === 0) {
+      errors.push(`config '${config.name}' has no physical target hosts.`);
+    } else {
+      const seenHosts = new Set<string>();
+      const duplicateHosts = new Set<string>();
+      for (const host of hosts) {
+        if (seenHosts.has(host) && !duplicateHosts.has(host)) {
+          errors.push(`host ${host} appears more than once in top-level hosts.`);
+          duplicateHosts.add(host);
+        }
+        seenHosts.add(host);
       }
     }
   }

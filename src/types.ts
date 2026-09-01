@@ -292,7 +292,7 @@ export interface SharedDeployDefaults {
 export type DeployClass = SharedDeployDefaults & {
   /** 'api' | 'worker' | 'ai' — unique within the config. */
   name: string;
-  /** Hosts in this class. No host may appear in two classes. */
+  /** Hosts in this class. Every physical host must be unique across the whole config. */
   hosts: string[];
   /**
    * Whether this class must fully succeed before the next class starts.
@@ -319,7 +319,8 @@ export interface DeployConfig {
    * healthCheck.path or haproxy.socketPath (those are remote/URL paths).
    */
   rootDir?: string;
-  hosts?: string[];                 // optional: absent on multi-class configs
+  /** Required and non-empty for flat configs; absent on multi-class configs. Hosts are unique. */
+  hosts?: string[];
   warPath?: string;                 // optional: may live per-class
   port?: number;                    // optional: may live per-class
   /** @deprecated Use strategy instead. Kept for backwards compatibility. */
@@ -490,7 +491,16 @@ export interface HostReachableResult {
  */
 export interface PreflightResult {
   host: string;
+  /**
+   * True when the agent answered with a valid `/health` snapshot. This proves
+   * transport reachability only; it does not imply that the agent/application
+   * is healthy (an unhealthy snapshot is intentionally returned with HTTP 503).
+   */
   reachable: boolean;
+  /** HTTP status returned by `/health` (currently 200 or 503). */
+  healthHttpStatus?: number;
+  /** Health posture reported by the validated snapshot. */
+  healthStatus?: 'healthy' | 'degraded' | 'unhealthy';
   agentVersion?: string;
   pluginVersion?: string;
   pluginRunning?: boolean;

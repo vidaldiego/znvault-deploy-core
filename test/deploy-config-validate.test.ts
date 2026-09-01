@@ -49,6 +49,21 @@ describe('validateDeployConfig', () => {
     expect(r.errors.some(e => /\.55.*two classes|host.*\.55/i.test(e))).toBe(true);
   });
 
+  it('errors once, deterministically, when a host repeats within one class', () => {
+    const r = validateDeployConfig({ name: 'x', warPath: '/a.war', port: 9100, classes: [
+      { name: 'api', hosts: ['.55', '.55', '.55'] },
+    ] });
+    expect(r.errors.filter(e => e === "host .55 appears more than once in class 'api'."))
+      .toHaveLength(1);
+  });
+
+  it('errors when all classes have an empty physical target set', () => {
+    const r = validateDeployConfig({ name: 'x', warPath: '/a.war', port: 9100, classes: [
+      { name: 'api', hosts: [] }, { name: 'worker', hosts: [] },
+    ] });
+    expect(r.errors).toContain("config 'x' has no physical target hosts.");
+  });
+
   it('errors when a serverMap key is not in the class hosts', () => {
     const r = validateDeployConfig({ name: 'x', warPath: '/a.war', port: 9100, classes: [
       { name: 'api', hosts: ['.55'], haproxy: { hosts: ['lb'], backend: 'b', serverMap: { '.55': 's1', '.99': 's9' } } },
@@ -87,6 +102,21 @@ describe('validateDeployConfig', () => {
   it('does not flag a valid flat config', () => {
     const r = validateDeployConfig({ name: 'flat', hosts: ['.1'], warPath: '/a.war', port: 9100, parallel: false });
     expect(r.errors).toEqual([]);
+  });
+
+  it.each([
+    { name: 'missing hosts', config: { name: 'flat', warPath: '/a.war', port: 9100 } },
+    { name: 'empty hosts', config: { name: 'flat', hosts: [], warPath: '/a.war', port: 9100 } },
+  ])('errors when a flat config has $name', ({ config }) => {
+    const r = validateDeployConfig(config as DeployConfig);
+    expect(r.errors).toContain("config 'flat' has no physical target hosts.");
+  });
+
+  it('errors once, deterministically, when a flat host repeats', () => {
+    const r = validateDeployConfig({
+      name: 'flat', hosts: ['.1', '.1', '.1'], warPath: '/a.war', port: 9100,
+    });
+    expect(r.errors).toEqual(['host .1 appears more than once in top-level hosts.']);
   });
 });
 
@@ -176,7 +206,7 @@ describe('validateDeployConfig — migration.scaffoldingFile', () => {
 });
 
 describe('rootDir validation', () => {
-  const mk = (over: Record<string, unknown>): any => ({ name: 'c', warPath: '/abs/app.war', ...over });
+  const mk = (over: Record<string, unknown>): any => ({ name: 'c', hosts: ['h1'], warPath: '/abs/app.war', ...over });
 
   // rootDir itself: relative rootDir is a hard ERROR (nothing to anchor to).
   it('rootDir that is relative → error', () => {

@@ -33,7 +33,12 @@ vi.mock('node:child_process', () => ({ spawn: (...a: unknown[]) => mockSpawn(...
 const tunnelMod = await import('../src/ssh-tunnel.js');
 
 type FakeChild = EventEmitter & {
-  stdout: EventEmitter; stderr: EventEmitter; kill: (sig?: string) => void; pid: number;
+  stdout: EventEmitter;
+  stderr: EventEmitter;
+  kill: (sig?: NodeJS.Signals) => boolean;
+  pid: number;
+  exitCode: number | null;
+  signalCode: NodeJS.Signals | null;
 };
 
 function makeChild(): FakeChild {
@@ -41,7 +46,12 @@ function makeChild(): FakeChild {
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.pid = 4242;
-  child.kill = vi.fn();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.kill = vi.fn((signal: NodeJS.Signals = 'SIGTERM') => {
+    setTimeout(() => child.emit('exit', null, signal), 0);
+    return true;
+  });
   return child;
 }
 
@@ -83,7 +93,10 @@ describe('openTunnel', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     agent = http.createServer((req, res) => {
-      if (req.url === '/health') { res.writeHead(200); res.end('{"status":"healthy"}'); }
+      // Recovery may legitimately start with unhealthy Payara, so /health is
+      // 503. The tunnel readiness contract is the independent /live rail.
+      if (req.url === '/health') { res.writeHead(503); res.end('{"status":"unhealthy"}'); }
+      else if (req.url === '/live') { res.writeHead(200); res.end('{"alive":true}'); }
       else { res.writeHead(404); res.end(); }
     });
     await new Promise<void>((r) => agent.listen(0, '127.0.0.1', r));
@@ -93,15 +106,18 @@ describe('openTunnel', () => {
 
   it('opens a tunnel, reports the local port, and tears down on close', async () => {
     // The fake forward "binds" the same port our local stub agent listens on,
-    // so the readiness probe to 127.0.0.1:<port>/health hits the stub.
+    // so the readiness probe to 127.0.0.1:<port>/live hits the stub.
     const child = fakeForwardChild(agentPort);
     mockSpawn.mockReturnValue(child);
 
-    const t = await tunnelMod.openTunnel('172.16.220.55', {
+    const t = await tunnelMod.openTunnel('192.0.2.55', {
       user: 'sysadmin', remotePort: 9100, znvaultBin: 'znvault', readinessTimeoutMs: 2000,
     });
 
     expect(t.localPort).toBe(agentPort);
+    expect(child.stdout.listenerCount('data')).toBe(0);
+    expect(child.listenerCount('close')).toBe(0);
+    expect(child.listenerCount('error')).toBe(0);
     // spawn called with ssh forward --print-port
     const [, args] = mockSpawn.mock.calls[0];
     expect(args).toContain('ssh');
@@ -112,14 +128,59 @@ describe('openTunnel', () => {
     expect(child.kill).toHaveBeenCalled();
   });
 
+  it('uses /live transport readiness even while /health is HTTP 503', async () => {
+    const child = fakeForwardChild(agentPort);
+    mockSpawn.mockReturnValue(child);
+
+    const t = await tunnelMod.openTunnel('192.0.2.55', {
+      znvaultBin: 'znvault', readinessTimeoutMs: 2000,
+    });
+
+    expect(t.localPort).toBe(agentPort);
+    await t.close();
+  });
+
   it('throws if the forward child exits before printing a port', async () => {
-    const child = new EventEmitter() as EventEmitter & { stdout: EventEmitter; stderr: EventEmitter; kill: () => void; pid: number };
-    child.stdout = new EventEmitter(); child.stderr = new EventEmitter(); child.kill = vi.fn(); child.pid = 1;
+    const child = makeChild();
     mockSpawn.mockReturnValue(child);
     const p = tunnelMod.openTunnel('h', { znvaultBin: 'znvault', readinessTimeoutMs: 500 });
     setTimeout(() => child.emit('close', 255), 5);
     await expect(p).rejects.toThrow();
   });
+
+  it('times out and kills a forward child that never reports a local port', async () => {
+    const child = makeChild();
+    mockSpawn.mockReturnValue(child);
+
+    await expect(
+      tunnelMod.openTunnel('192.0.2.55', {
+        znvaultBin: 'znvault', readinessTimeoutMs: 100,
+      }),
+    ).rejects.toThrow(/did not report a valid local port within 100ms/);
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(child.stdout.listenerCount('data')).toBe(0);
+    expect(child.listenerCount('close')).toBe(0);
+    expect(child.listenerCount('error')).toBe(0);
+  }, 3000);
+
+  it('escalates from SIGTERM to SIGKILL when the forward ignores termination', async () => {
+    const child = fakeForwardChild(agentPort);
+    child.kill = vi.fn((signal: NodeJS.Signals = 'SIGTERM') => {
+      if (signal === 'SIGKILL') {
+        setTimeout(() => child.emit('exit', null, signal), 0);
+      }
+      return true;
+    });
+    mockSpawn.mockReturnValue(child);
+
+    const tunnel = await tunnelMod.openTunnel('192.0.2.55', {
+      znvaultBin: 'znvault', readinessTimeoutMs: 2000,
+    });
+    await tunnel.close();
+
+    expect(child.kill).toHaveBeenNthCalledWith(1, 'SIGTERM');
+    expect(child.kill).toHaveBeenNthCalledWith(2, 'SIGKILL');
+  }, 3000);
 
   // Regression (FIX 1): a non-JSON line before the JSON contract line must NOT
   // deadlock the port read. Before the fix, the unparseable first line was
@@ -128,7 +189,7 @@ describe('openTunnel', () => {
     const child = fakeForwardChildWithPrefix(agentPort, 'some startup warning\n');
     mockSpawn.mockReturnValue(child);
 
-    const t = await tunnelMod.openTunnel('172.16.220.55', {
+    const t = await tunnelMod.openTunnel('192.0.2.55', {
       user: 'sysadmin', remotePort: 9100, znvaultBin: 'znvault', readinessTimeoutMs: 2000,
     });
 
@@ -142,7 +203,7 @@ describe('openTunnel', () => {
     const child = fakeForwardChildSplit(agentPort);
     mockSpawn.mockReturnValue(child);
 
-    const t = await tunnelMod.openTunnel('172.16.220.55', {
+    const t = await tunnelMod.openTunnel('192.0.2.55', {
       user: 'sysadmin', remotePort: 9100, znvaultBin: 'znvault', readinessTimeoutMs: 2000,
     });
 
@@ -150,10 +211,10 @@ describe('openTunnel', () => {
     await t.close();
   }, 5000);
 
-  // Readiness timeout: a valid port is printed but /health never answers (no
+  // Readiness timeout: a valid port is printed but /live never answers (no
   // server on that port). openTunnel must reject AND kill the child (close()
   // runs before throwing).
-  it('rejects and kills the child when /health never answers', async () => {
+  it('rejects and kills the child when /live never answers', async () => {
     // Bind then immediately release a port so nothing is listening on it.
     const dead = http.createServer();
     const deadPort = await new Promise<number>((resolve) => {
@@ -167,10 +228,32 @@ describe('openTunnel', () => {
     mockSpawn.mockReturnValue(child);
 
     await expect(
-      tunnelMod.openTunnel('172.16.220.55', {
+      tunnelMod.openTunnel('192.0.2.55', {
         user: 'sysadmin', remotePort: 9100, znvaultBin: 'znvault', readinessTimeoutMs: 600,
       }),
     ).rejects.toThrow(/never answered/);
+    expect(child.kill).toHaveBeenCalled();
+  }, 3000);
+
+  it('rejects and kills the child when /live returns invalid JSON', async () => {
+    await new Promise<void>((resolve, reject) => {
+      agent.close((error) => error ? reject(error) : resolve());
+    });
+    agent = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('not-json');
+    });
+    await new Promise<void>((r) => agent.listen(0, '127.0.0.1', r));
+    agentPort = (agent.address() as import('node:net').AddressInfo).port;
+
+    const child = fakeForwardChild(agentPort);
+    mockSpawn.mockReturnValue(child);
+
+    await expect(
+      tunnelMod.openTunnel('192.0.2.55', {
+        znvaultBin: 'znvault', readinessTimeoutMs: 600,
+      }),
+    ).rejects.toThrow(/\/live never answered/);
     expect(child.kill).toHaveBeenCalled();
   }, 3000);
 });
