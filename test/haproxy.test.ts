@@ -25,11 +25,11 @@ const {
 
 function makeConfig(overrides: Partial<HAProxyConfig> = {}): HAProxyConfig {
   return {
-    hosts: ['172.16.220.20', '172.16.220.21', '172.16.220.23'],
+    hosts: ['198.51.100.20', '198.51.100.21', '198.51.100.23'],
     backend: 'api_servers',
     serverMap: {
-      '172.16.211.10': 'server1',
-      '172.16.211.11': 'server2',
+      '192.0.2.10': 'server1',
+      '192.0.2.11': 'server2',
     },
     ...overrides,
   };
@@ -77,7 +77,7 @@ describe('sshExec', () => {
       'ssh',
       expect.arrayContaining([
         '-o', 'BatchMode=yes',
-        '-o', 'StrictHostKeyChecking=accept-new',
+        '-o', 'StrictHostKeyChecking=yes',
         '-p', '2222',
         'myuser@10.0.0.1',
         'ls',
@@ -98,6 +98,16 @@ describe('sshExec', () => {
     expect(result.success).toBe(false);
     expect(result.error).toBe('Permission denied (publickey)');
   });
+
+  it.each([
+    ['host', '-oProxyCommand=touch /tmp/owned', 'admin', 22, 5000, 'host contains unsupported characters'],
+    ['user', '1.2.3.4', '-oProxyCommand=touch /tmp/owned', 22, 5000, 'user contains unsupported characters'],
+    ['port', '1.2.3.4', 'admin', 0, 5000, 'port must be an integer'],
+    ['timeout', '1.2.3.4', 'admin', 22, Number.NaN, 'timeout must be a positive integer'],
+  ])('rejects an unsafe %s before starting ssh', (_field, host, user, port, timeout, error) => {
+    expect(() => sshExec(host, user, port, 'echo ok', timeout)).toThrow(error);
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
 });
 
 describe('setServerState', () => {
@@ -112,7 +122,7 @@ describe('setServerState', () => {
     });
 
     const config = makeConfig();
-    const result = await setServerState(config, '172.16.211.10', 'drain');
+    const result = await setServerState(config, '192.0.2.10', 'drain');
 
     expect(result.success).toBe(true);
     expect(result.results).toHaveLength(3);
@@ -121,7 +131,7 @@ describe('setServerState', () => {
     const firstCallArgs = mockExecFile.mock.calls[0]![1] as string[];
     const command = firstCallArgs[firstCallArgs.length - 1];
     expect(command).toContain('set server api_servers/server1 state drain');
-    expect(command).toContain('sudo socat stdio /run/haproxy/admin.sock');
+    expect(command).toContain("sudo socat stdio '/run/haproxy/admin.sock'");
   });
 
   it('should use sudo by default', async () => {
@@ -131,7 +141,7 @@ describe('setServerState', () => {
     });
 
     const config = makeConfig();
-    await setServerState(config, '172.16.211.10', 'drain');
+    await setServerState(config, '192.0.2.10', 'drain');
 
     const firstCallArgs = mockExecFile.mock.calls[0]![1] as string[];
     const command = firstCallArgs[firstCallArgs.length - 1];
@@ -145,7 +155,7 @@ describe('setServerState', () => {
     });
 
     const config = makeConfig({ sudo: false });
-    await setServerState(config, '172.16.211.10', 'drain');
+    await setServerState(config, '192.0.2.10', 'drain');
 
     const firstCallArgs = mockExecFile.mock.calls[0]![1] as string[];
     const command = firstCallArgs[firstCallArgs.length - 1];
@@ -174,7 +184,7 @@ describe('setServerState', () => {
     });
 
     const config = makeConfig();
-    const result = await setServerState(config, '172.16.211.10', 'drain');
+    const result = await setServerState(config, '192.0.2.10', 'drain');
 
     expect(result.success).toBe(false);
     expect(result.results.filter(r => r.success)).toHaveLength(2);
@@ -194,15 +204,69 @@ describe('setServerState', () => {
       sshTimeout: 20000,
     });
 
-    await setServerState(config, '172.16.211.10', 'ready');
+    await setServerState(config, '192.0.2.10', 'ready');
 
     const firstCallArgs = mockExecFile.mock.calls[0]![1] as string[];
     expect(firstCallArgs).toContain('-p');
     expect(firstCallArgs).toContain('2222');
-    expect(firstCallArgs).toContain('root@172.16.220.20');
+    expect(firstCallArgs).toContain('root@198.51.100.20');
     const command = firstCallArgs[firstCallArgs.length - 1];
     expect(command).toContain('/var/run/haproxy.sock');
     expect(command).toContain('state ready');
+  });
+
+  it.each([
+    {
+      field: 'backend',
+      config: makeConfig({ backend: 'api_servers; touch /tmp/owned' }),
+      error: 'backend contains unsupported characters',
+    },
+    {
+      field: 'server name',
+      config: makeConfig({
+        serverMap: { '192.0.2.10': 'server1$(touch /tmp/owned)' },
+      }),
+      error: 'server name contains unsupported characters',
+    },
+    {
+      field: 'socketPath',
+      config: makeConfig({
+        socketPath: '/run/haproxy/admin.sock; touch /tmp/owned',
+      }),
+      error: 'socketPath must be an absolute shell-safe path',
+    },
+  ])('rejects an unsafe $field before starting any SSH process', async ({ config, error }) => {
+    await expect(
+      setServerState(config, '192.0.2.10', 'drain')
+    ).rejects.toThrow(error);
+
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it('validates every HAProxy SSH destination before starting any process', async () => {
+    const config = makeConfig({
+      hosts: ['198.51.100.20', '-oProxyCommand=touch /tmp/owned'],
+      user: 'testuser',
+    });
+
+    await expect(
+      setServerState(config, '192.0.2.10', 'drain')
+    ).rejects.toThrow('SSH host contains unsupported characters');
+
+    expect(mockExecFile).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { hosts: [], error: 'must contain at least one destination' },
+    { hosts: ['198.51.100.20', '198.51.100.20'], error: 'must not contain duplicates' },
+  ])('rejects an invalid HAProxy SSH host set before claiming success', async ({ hosts, error }) => {
+    const config = makeConfig({ hosts });
+
+    await expect(
+      setServerState(config, '192.0.2.10', 'drain')
+    ).rejects.toThrow(error);
+
+    expect(mockExecFile).not.toHaveBeenCalled();
   });
 });
 
@@ -217,7 +281,7 @@ describe('drainServer / readyServer', () => {
 
   it('drainServer should call setServerState with drain', async () => {
     const config = makeConfig();
-    const result = await drainServer(config, '172.16.211.10');
+    const result = await drainServer(config, '192.0.2.10');
 
     expect(result.success).toBe(true);
     const firstCallArgs = mockExecFile.mock.calls[0]![1] as string[];
@@ -227,7 +291,7 @@ describe('drainServer / readyServer', () => {
 
   it('readyServer should call setServerState with ready', async () => {
     const config = makeConfig();
-    const result = await readyServer(config, '172.16.211.11');
+    const result = await readyServer(config, '192.0.2.11');
 
     expect(result.success).toBe(true);
     const firstCallArgs = mockExecFile.mock.calls[0]![1] as string[];
@@ -280,25 +344,25 @@ describe('getUnmappedHosts', () => {
   it('should return hosts without serverMap entries', () => {
     const config = makeConfig();
     const unmapped = getUnmappedHosts(config, [
-      '172.16.211.10', // mapped
-      '172.16.211.11', // mapped
-      '172.16.211.12', // NOT mapped
+      '192.0.2.10', // mapped
+      '192.0.2.11', // mapped
+      '192.0.2.12', // NOT mapped
     ]);
 
-    expect(unmapped).toEqual(['172.16.211.12']);
+    expect(unmapped).toEqual(['192.0.2.12']);
   });
 
   it('should return empty array when all hosts are mapped', () => {
     const config = makeConfig();
-    const unmapped = getUnmappedHosts(config, ['172.16.211.10', '172.16.211.11']);
+    const unmapped = getUnmappedHosts(config, ['192.0.2.10', '192.0.2.11']);
 
     expect(unmapped).toEqual([]);
   });
 
   it('should return all hosts when serverMap is empty', () => {
     const config = makeConfig({ serverMap: {} });
-    const unmapped = getUnmappedHosts(config, ['172.16.211.10', '172.16.211.11']);
+    const unmapped = getUnmappedHosts(config, ['192.0.2.10', '192.0.2.11']);
 
-    expect(unmapped).toEqual(['172.16.211.10', '172.16.211.11']);
+    expect(unmapped).toEqual(['192.0.2.10', '192.0.2.11']);
   });
 });

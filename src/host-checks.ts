@@ -11,6 +11,7 @@ import { MAX_RETRIES, getRetryDelay } from './constants.js';
 import { getErrorMessage } from './utils/error.js';
 import type {
   PluginVersionsResponse,
+  PluginUpdateRequest,
   PluginUpdateResponse,
   PluginVersionCheckResult,
   TriggerUpdateResult,
@@ -137,15 +138,59 @@ export async function triggerPluginUpdate(
   port: number,
   useTLS = false,
   pluginNamespace: string = 'payara',
+  request: PluginUpdateRequest,
   auth?: AgentRequestAuth
 ): Promise<TriggerUpdateResult> {
+  if (
+    request.package.trim() === ''
+    || !VERSION_PATTERN.test(request.expectedVersion)
+  ) {
+    return {
+      success: false,
+      error: 'Exact plugin package and expected semver are required for updates',
+    };
+  }
+
   const pluginUrl = buildPluginUrl(host, port, useTLS, pluginNamespace);
   const updateUrl = pluginUrl.replace(`/plugins/${pluginNamespace}`, '/plugins/update');
 
   try {
     // Import agentPost for TLS-aware POST
     const { agentPost } = await import('./http-client.js');
-    const data = await agentPost<PluginUpdateResponse>(updateUrl, {}, undefined, auth);
+    const data = await agentPost<PluginUpdateResponse>(updateUrl, request, undefined, auth);
+    const expected = data.results.filter(result => result.package === request.package);
+    if (data.results.length !== 1 || expected.length !== 1) {
+      return {
+        success: false,
+        error: 'Agent update receipt did not contain exactly the requested plugin',
+        response: data,
+      };
+    }
+
+    const [result] = expected;
+    if (!result?.success) {
+      return {
+        success: false,
+        error: result?.error ?? 'Requested plugin update failed',
+        response: data,
+      };
+    }
+    if (result.newVersion !== request.expectedVersion) {
+      return {
+        success: false,
+        error: `Agent installed ${result.newVersion}; expected ${request.expectedVersion}`,
+        response: data,
+      };
+    }
+
+    const changed = result.previousVersion !== result.newVersion;
+    if (data.updated !== (changed ? 1 : 0) || data.willRestart !== changed) {
+      return {
+        success: false,
+        error: 'Agent update receipt has inconsistent restart/update counts',
+        response: data,
+      };
+    }
     return { success: true, response: data };
   } catch (err) {
     const message = getErrorMessage(err);

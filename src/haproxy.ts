@@ -8,6 +8,37 @@ const DEFAULT_USER = 'sysadmin';
 const DEFAULT_SSH_PORT = 22;
 const DEFAULT_SOCKET_PATH = '/run/haproxy/admin.sock';
 const DEFAULT_SSH_TIMEOUT = 10000;
+const HAPROXY_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
+const HAPROXY_SOCKET_PATH_PATTERN = /^\/[A-Za-z0-9_./-]{1,4095}$/u;
+const SSH_USER_PATTERN = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/u;
+const SSH_HOST_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:%-]{0,252}$/u;
+
+function validateSSHConnection(host: string, user: string, port: number, timeout: number): void {
+  if (typeof host !== 'string' || !SSH_HOST_PATTERN.test(host)) {
+    throw new Error('HAProxy SSH host contains unsupported characters');
+  }
+  if (typeof user !== 'string' || !SSH_USER_PATTERN.test(user)) {
+    throw new Error('HAProxy SSH user contains unsupported characters');
+  }
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new Error('HAProxy SSH port must be an integer between 1 and 65535');
+  }
+  if (!Number.isSafeInteger(timeout) || timeout < 1) {
+    throw new Error('HAProxy SSH timeout must be a positive integer');
+  }
+}
+
+function validateSSHBatch(hosts: string[], user: string, port: number, timeout: number): void {
+  if (!Array.isArray(hosts) || hosts.length === 0) {
+    throw new Error('HAProxy SSH hosts must contain at least one destination');
+  }
+  if (new Set(hosts).size !== hosts.length) {
+    throw new Error('HAProxy SSH hosts must not contain duplicates');
+  }
+  for (const host of hosts) {
+    validateSSHConnection(host, user, port, timeout);
+  }
+}
 
 /**
  * Result from a single SSH command execution
@@ -40,12 +71,13 @@ export function sshExec(
   command: string,
   timeout: number
 ): Promise<SSHExecResult> {
+  validateSSHConnection(host, user, port, timeout);
   const connectTimeout = Math.max(1, Math.ceil(timeout / 1000));
 
   return new Promise((resolve) => {
     const args = [
       '-o', 'BatchMode=yes',
-      '-o', 'StrictHostKeyChecking=accept-new',
+      '-o', 'StrictHostKeyChecking=yes',
       '-o', `ConnectTimeout=${connectTimeout}`,
       '-p', String(port),
       `${user}@${host}`,
@@ -72,8 +104,23 @@ export function sshExec(
  * Build the socat command to set HAProxy server state
  */
 function buildSocatCommand(socketPath: string, backend: string, serverName: string, state: 'drain' | 'ready', sudo: boolean): string {
+  if (typeof backend !== 'string' || !HAPROXY_IDENTIFIER_PATTERN.test(backend)) {
+    throw new Error('HAProxy backend contains unsupported characters');
+  }
+  if (typeof serverName !== 'string' || !HAPROXY_IDENTIFIER_PATTERN.test(serverName)) {
+    throw new Error('HAProxy server name contains unsupported characters');
+  }
+  if (typeof socketPath !== 'string' || !HAPROXY_SOCKET_PATH_PATTERN.test(socketPath)) {
+    throw new Error('HAProxy socketPath must be an absolute shell-safe path');
+  }
+
+  // ssh sends one command string to the remote login shell. Keep that program
+  // fixed, validate every substituted token above, and quote each data value as
+  // a single POSIX-shell argument as defense in depth.
+  const quote = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
+  const runtimeCommand = `set server ${backend}/${serverName} state ${state}`;
   const prefix = sudo ? 'sudo ' : '';
-  return `echo "set server ${backend}/${serverName} state ${state}" | ${prefix}socat stdio ${socketPath}`;
+  return `printf '%s\\n' ${quote(runtimeCommand)} | ${prefix}socat stdio ${quote(socketPath)}`;
 }
 
 /**
@@ -104,6 +151,7 @@ export async function setServerState(
   const socketPath = config.socketPath ?? DEFAULT_SOCKET_PATH;
   const timeout = config.sshTimeout ?? DEFAULT_SSH_TIMEOUT;
   const sudo = config.sudo !== false; // default true
+  validateSSHBatch(config.hosts, user, port, timeout);
   const command = buildSocatCommand(socketPath, config.backend, serverName, state, sudo);
 
   const results = await Promise.all(
@@ -135,6 +183,7 @@ export async function testHAProxyConnectivity(config: HAProxyConfig): Promise<HA
   const user = config.user ?? DEFAULT_USER;
   const port = config.sshPort ?? DEFAULT_SSH_PORT;
   const timeout = config.sshTimeout ?? DEFAULT_SSH_TIMEOUT;
+  validateSSHBatch(config.hosts, user, port, timeout);
 
   const results = await Promise.all(
     config.hosts.map(host => sshExec(host, user, port, 'echo ok', timeout))

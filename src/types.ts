@@ -589,6 +589,12 @@ export interface PluginUpdateResult {
   error?: string;
 }
 
+/** Exact, allowlisted plugin artifact requested from an agent. */
+export interface PluginUpdateRequest {
+  package: string;
+  expectedVersion: string;
+}
+
 /**
  * Plugin update response from agent /plugins/update endpoint
  */

@@ -51,11 +51,20 @@ body and `DEPLOYMENT_ID_HEADER`, and rejects a mismatched payload locally. Use
 that header directly for binary uploads. Polling fails closed if the agent
 cannot prove the terminal receipt belongs to that exact operation.
 
+On-demand plugin updates are similarly exact: `triggerPluginUpdate` requires
+an explicit package and target version, and accepts only a single matching
+success receipt. It never turns an unscoped or partial agent response into
+success.
+
 The library never loads, persists, or logs the token. Callers must read it from
 a private local file and keep the value out of command arguments, environment
 variables, URLs, deploy configuration, and diagnostics. Authenticated requests
 are rejected unless they use loopback (including an SSH local forward) or
 verified HTTPS; `verify: false` can never carry a control-plane credential.
+
+HAProxy SSH operations require a pre-provisioned host key in `known_hosts` and
+use strict host-key verification. User, host, port, timeout, backend, server,
+and socket inputs are validated before any SSH process starts.
 
 ## Development
 

@@ -33,6 +33,7 @@ export type {
   PluginVersionInfo,
   PluginVersionsResponse,
   PluginUpdateResult,
+  PluginUpdateRequest,
   PluginUpdateResponse,
   PluginVersionCheckResult,
   TriggerUpdateResult,
