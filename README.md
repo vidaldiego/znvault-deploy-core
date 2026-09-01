@@ -52,9 +52,10 @@ that header directly for binary uploads. Polling fails closed if the agent
 cannot prove the terminal receipt belongs to that exact operation.
 
 On-demand plugin updates are similarly exact: `triggerPluginUpdate` requires
-an explicit package and target version, and accepts only a single matching
-success receipt. It never turns an unscoped or partial agent response into
-success.
+an operation UUID, explicit package, preflight-installed version, and target
+version. The agent accepts the mutation asynchronously; Core polls only that
+UUID until it receives a correlated durable terminal receipt. Transport loss,
+an unrelated receipt, version drift, and timeout all fail closed.
 
 The library never loads, persists, or logs the token. Callers must read it from
 a private local file and keep the value out of command arguments, environment

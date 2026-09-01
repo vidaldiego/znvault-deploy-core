@@ -591,7 +591,12 @@ export interface PluginUpdateResult {
 
 /** Exact, allowlisted plugin artifact requested from an agent. */
 export interface PluginUpdateRequest {
+  /** Opaque UUID for one idempotent update attempt and its durable receipt. */
+  requestId: string;
   package: string;
+  /** Exact installed version observed during the caller's preflight. */
+  expectedCurrentVersion: string;
+  /** Exact target version (never a range or dist-tag). */
   expectedVersion: string;
 }
 
@@ -599,11 +604,15 @@ export interface PluginUpdateRequest {
  * Plugin update response from agent /plugins/update endpoint
  */
 export interface PluginUpdateResponse {
+  requestId: string;
   updated: number;
   results: PluginUpdateResult[];
   willRestart: boolean;
   message: string;
   timestamp: string;
+  requestedAt: string;
+  startedAt: string;
+  finishedAt: string;
 }
 
 /**

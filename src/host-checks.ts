@@ -7,7 +7,13 @@ import {
   agentGet,
   type AgentRequestAuth,
 } from './http-client.js';
-import { MAX_RETRIES, getRetryDelay } from './constants.js';
+import {
+  AGENT_TIMEOUT_MS,
+  MAX_RETRIES,
+  STATUS_POLL_INTERVAL_MS,
+  STATUS_POLL_MAX_WAIT_MS,
+  getRetryDelay,
+} from './constants.js';
 import { getErrorMessage } from './utils/error.js';
 import type {
   PluginVersionsResponse,
@@ -40,9 +46,58 @@ interface AgentHealthSnapshot {
 }
 
 const VERSION_PATTERN = /^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
+const EXACT_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u;
+const NPM_PACKAGE_PATTERN = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/u;
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+interface PluginUpdatePendingWire {
+  status: 'pending';
+  requestId: string;
+  package: string;
+  previousVersion: string;
+  targetVersion: string;
+  requestedAt: string;
+  pollPath?: string;
+}
+
+interface PluginUpdateFailedWire {
+  status: 'failed';
+  requestId?: string;
+  package?: string;
+  previousVersion?: string;
+  targetVersion?: string;
+  installedVersion?: string;
+  requestedAt?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  code?: string;
+  error?: string;
+  willRestart?: boolean;
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isExactIsoTimestamp(value: unknown): value is string {
+  if (
+    typeof value !== 'string'
+    || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)
+  ) return false;
+  const parsed = new Date(value);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
+}
+
+function hasMonotonicReceiptTimestamps(value: Record<string, unknown>): value is Record<string, unknown> & {
+  requestedAt: string;
+  startedAt: string;
+  finishedAt: string;
+} {
+  return isExactIsoTimestamp(value.requestedAt)
+    && isExactIsoTimestamp(value.startedAt)
+    && isExactIsoTimestamp(value.finishedAt)
+    && Date.parse(value.requestedAt) <= Date.parse(value.startedAt)
+    && Date.parse(value.startedAt) <= Date.parse(value.finishedAt);
 }
 
 /**
@@ -142,65 +197,198 @@ export async function triggerPluginUpdate(
   auth?: AgentRequestAuth
 ): Promise<TriggerUpdateResult> {
   if (
-    request.package.trim() === ''
-    || !VERSION_PATTERN.test(request.expectedVersion)
+    !request
+    || typeof request.requestId !== 'string'
+    || !UUID_V4_PATTERN.test(request.requestId)
+    || typeof request.package !== 'string'
+    || request.package.length > 214
+    || !NPM_PACKAGE_PATTERN.test(request.package)
+    || typeof request.expectedCurrentVersion !== 'string'
+    || !EXACT_VERSION_PATTERN.test(request.expectedCurrentVersion)
+    || typeof request.expectedVersion !== 'string'
+    || !EXACT_VERSION_PATTERN.test(request.expectedVersion)
   ) {
     return {
       success: false,
-      error: 'Exact plugin package and expected semver are required for updates',
+      error: 'Exact request UUID, plugin package, current semver, and target semver are required for updates',
     };
   }
 
   const pluginUrl = buildPluginUrl(host, port, useTLS, pluginNamespace);
   const updateUrl = pluginUrl.replace(`/plugins/${pluginNamespace}`, '/plugins/update');
+  const statusUrl = `${updateUrl}/${encodeURIComponent(request.requestId)}`;
+  const expectedPollPath = `/plugins/update/${request.requestId}`;
+  const pollStartedAt = performance.now();
+
+  const parseJsonObject = async (response: Response): Promise<Record<string, unknown> | undefined> => {
+    try {
+      const value = await response.json() as unknown;
+      return isRecord(value) ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  const validatePending = (value: Record<string, unknown>): PluginUpdatePendingWire | undefined => {
+    if (
+      value.status !== 'pending'
+      || value.requestId !== request.requestId
+      || value.package !== request.package
+      || value.previousVersion !== request.expectedCurrentVersion
+      || value.targetVersion !== request.expectedVersion
+      || !isExactIsoTimestamp(value.requestedAt)
+      || (value.pollPath !== undefined && value.pollPath !== expectedPollPath)
+    ) {
+      return undefined;
+    }
+    return value as unknown as PluginUpdatePendingWire;
+  };
+
+  const validateSuccess = (value: Record<string, unknown>): PluginUpdateResponse | undefined => {
+    if (
+      value.status !== 'succeeded'
+      || value.requestId !== request.requestId
+      || value.package !== request.package
+      || value.previousVersion !== request.expectedCurrentVersion
+      || value.targetVersion !== request.expectedVersion
+      || value.newVersion !== request.expectedVersion
+      || value.installedVersion !== request.expectedVersion
+      || !hasMonotonicReceiptTimestamps(value)
+    ) {
+      return undefined;
+    }
+    const changed = request.expectedCurrentVersion !== request.expectedVersion;
+    if (value.updated !== (changed ? 1 : 0) || value.willRestart !== changed) {
+      return undefined;
+    }
+    return {
+      requestId: request.requestId,
+      updated: changed ? 1 : 0,
+      willRestart: changed,
+      results: [{
+        package: request.package,
+        previousVersion: request.expectedCurrentVersion,
+        newVersion: request.expectedVersion,
+        success: true,
+      }],
+      message: changed ? 'Exact plugin update completed' : 'Exact plugin version already installed',
+      timestamp: value.finishedAt,
+      requestedAt: value.requestedAt,
+      startedAt: value.startedAt,
+      finishedAt: value.finishedAt,
+    };
+  };
+
+  const correlatedFailure = (value: Record<string, unknown> | undefined): PluginUpdateFailedWire | undefined => {
+    if (!value || value.status !== 'failed') return undefined;
+    if (value.requestId !== request.requestId) return undefined;
+    if (value.package !== request.package) return undefined;
+    if (
+      value.previousVersion !== undefined
+      && (
+        typeof value.previousVersion !== 'string'
+        || !EXACT_VERSION_PATTERN.test(value.previousVersion)
+      )
+    ) return undefined;
+    if (value.targetVersion !== request.expectedVersion) {
+      return undefined;
+    }
+    if (value.willRestart !== false) return undefined;
+    return value as unknown as PluginUpdateFailedWire;
+  };
+
+  const failureMessage = (value: PluginUpdateFailedWire | undefined, status: number): string => {
+    if (!value) return `Agent returned an uncorrelated plugin update failure (HTTP ${status})`;
+    return value.error ?? value.code ?? `Plugin update failed (HTTP ${status})`;
+  };
+
+  const pollExactReceipt = async (): Promise<TriggerUpdateResult> => {
+    while (performance.now() - pollStartedAt < STATUS_POLL_MAX_WAIT_MS) {
+      try {
+        const response = await agentFetch(statusUrl, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(Math.max(
+            1,
+            Math.floor(Math.min(
+              AGENT_TIMEOUT_MS,
+              STATUS_POLL_MAX_WAIT_MS - (performance.now() - pollStartedAt)
+            ))
+          )),
+        }, auth);
+        const value = await parseJsonObject(response);
+        if (response.status === 200) {
+          const data = value && validateSuccess(value);
+          return data
+            ? { success: true, response: data }
+            : { success: false, error: 'Agent returned an invalid or uncorrelated update success receipt' };
+        }
+        if (response.status === 202) {
+          if (!value || !validatePending(value)) {
+            return { success: false, error: 'Agent returned an invalid or uncorrelated pending update receipt' };
+          }
+        } else if (response.status === 409 || response.status === 502) {
+          const failure = correlatedFailure(value);
+          return { success: false, error: failureMessage(failure, response.status) };
+        } else if (response.status === 401 || response.status === 403) {
+          return { success: false, error: `Agent rejected plugin update receipt access (HTTP ${response.status})` };
+        } else if (response.status !== 404 && response.status >= 400 && response.status < 500) {
+          return { success: false, error: `Agent rejected plugin update receipt polling (HTTP ${response.status})` };
+        }
+      } catch {
+        // The accepted update intentionally restarts the agent. Transport loss
+        // is therefore retried, but can never itself become success.
+      }
+
+      const remaining = STATUS_POLL_MAX_WAIT_MS - (performance.now() - pollStartedAt);
+      if (remaining > 0) {
+        await new Promise(resolve => setTimeout(
+          resolve,
+          Math.min(STATUS_POLL_INTERVAL_MS, remaining)
+        ));
+      }
+    }
+    return {
+      success: false,
+      error: `Timed out waiting for exact plugin update receipt ${request.requestId}`,
+    };
+  };
 
   try {
-    // Import agentPost for TLS-aware POST
-    const { agentPost } = await import('./http-client.js');
-    const data = await agentPost<PluginUpdateResponse>(updateUrl, request, undefined, auth);
-    const expected = data.results.filter(result => result.package === request.package);
-    if (data.results.length !== 1 || expected.length !== 1) {
+    const response = await agentFetch(updateUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+      body: JSON.stringify(request),
+      signal: AbortSignal.timeout(AGENT_TIMEOUT_MS),
+    }, auth);
+    const value = await parseJsonObject(response);
+    if (response.status === 200) {
       return {
         success: false,
-        error: 'Agent update receipt did not contain exactly the requested plugin',
-        response: data,
+        error: 'Agent returned terminal plugin update state from POST; a durable GET receipt is required',
       };
     }
-
-    const [result] = expected;
-    if (!result?.success) {
-      return {
-        success: false,
-        error: result?.error ?? 'Requested plugin update failed',
-        response: data,
-      };
+    if (response.status === 202) {
+      if (!value || !validatePending(value)) {
+        return { success: false, error: 'Agent returned an invalid or uncorrelated pending update receipt' };
+      }
+      return pollExactReceipt();
     }
-    if (result.newVersion !== request.expectedVersion) {
-      return {
-        success: false,
-        error: `Agent installed ${result.newVersion}; expected ${request.expectedVersion}`,
-        response: data,
-      };
+    if (response.status === 409 || response.status === 502) {
+      const failure = correlatedFailure(value);
+      return { success: false, error: failureMessage(failure, response.status) };
     }
-
-    const changed = result.previousVersion !== result.newVersion;
-    if (data.updated !== (changed ? 1 : 0) || data.willRestart !== changed) {
-      return {
-        success: false,
-        error: 'Agent update receipt has inconsistent restart/update counts',
-        response: data,
-      };
+    if (response.status === 404) {
+      return { success: false, error: 'Agent does not support recoverable plugin updates (upgrade agent to 2.0+)' };
     }
-    return { success: true, response: data };
-  } catch (err) {
-    const message = getErrorMessage(err);
-    if (message.includes('timeout') || message.includes('aborted')) {
-      return { success: false, error: 'Update timed out (npm install may still be running)' };
-    }
-    if (message.includes('404')) {
-      return { success: false, error: 'Agent does not support plugin updates (upgrade agent to 1.15+)' };
-    }
-    return { success: false, error: message };
+    return { success: false, error: `Agent plugin update request failed (HTTP ${response.status})` };
+  } catch {
+    // The POST may have crossed the transport boundary. Its UUID is durable,
+    // so poll only that exact operation rather than retrying the mutation.
+    return pollExactReceipt();
   }
 }
 

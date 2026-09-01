@@ -93,66 +93,166 @@ describe('checkHostReachable health snapshot contract', () => {
 });
 
 describe('triggerPluginUpdate exact receipt contract', () => {
+  const REQUEST = {
+    requestId: '123e4567-e89b-42d3-a456-426614174000',
+    package: '@zincapp/znvault-plugin-payara',
+    expectedCurrentVersion: '3.0.0',
+    expectedVersion: '3.0.1',
+  } as const;
+
+  const requestedAt = '2026-09-01T01:00:00.000Z';
+  const startedAt = '2026-09-01T01:00:01.000Z';
+  const finishedAt = '2026-09-01T01:00:02.000Z';
+
+  const pending = {
+    status: 'pending',
+    requestId: REQUEST.requestId,
+    package: REQUEST.package,
+    previousVersion: REQUEST.expectedCurrentVersion,
+    targetVersion: REQUEST.expectedVersion,
+    requestedAt,
+    pollPath: `/plugins/update/${REQUEST.requestId}`,
+  } as const;
+
+  const succeeded = {
+    status: 'succeeded',
+    requestId: REQUEST.requestId,
+    package: REQUEST.package,
+    previousVersion: REQUEST.expectedCurrentVersion,
+    targetVersion: REQUEST.expectedVersion,
+    newVersion: REQUEST.expectedVersion,
+    installedVersion: REQUEST.expectedVersion,
+    updated: 1,
+    willRestart: true,
+    requestedAt,
+    startedAt,
+    finishedAt,
+  } as const;
+
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
-  it('sends one exact package/version and accepts only its exact receipt', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, {
-      updated: 1,
-      willRestart: true,
-      results: [{
-        package: '@zincapp/znvault-plugin-payara',
-        previousVersion: '3.0.0',
-        newVersion: '3.0.1',
-        success: true,
-      }],
-      message: 'updated',
-      timestamp: new Date(0).toISOString(),
-    }));
+  it('submits one exact operation and polls only its UUID to a terminal receipt', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse(202, pending))
+      .mockResolvedValueOnce(jsonResponse(202, pending))
+      .mockResolvedValueOnce(jsonResponse(200, succeeded));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(triggerPluginUpdate(
+    const result = triggerPluginUpdate(
       '127.0.0.1',
       9100,
       false,
       'payara',
-      { package: '@zincapp/znvault-plugin-payara', expectedVersion: '3.0.1' },
+      REQUEST,
       undefined,
-    )).resolves.toMatchObject({ success: true });
-    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
-      package: '@zincapp/znvault-plugin-payara',
-      expectedVersion: '3.0.1',
+    );
+    await vi.runAllTimersAsync();
+    await expect(result).resolves.toMatchObject({
+      success: true,
+      response: {
+        requestId: REQUEST.requestId,
+        updated: 1,
+        willRestart: true,
+        results: [{
+          package: REQUEST.package,
+          previousVersion: REQUEST.expectedCurrentVersion,
+          newVersion: REQUEST.expectedVersion,
+          success: true,
+        }],
+        timestamp: finishedAt,
+        requestedAt,
+        startedAt,
+        finishedAt,
+      },
     });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      ...REQUEST,
+    });
+    expect(fetchMock.mock.calls.slice(1).map(([url]) => url)).toEqual([
+      `http://127.0.0.1:9100/plugins/update/${REQUEST.requestId}`,
+      `http://127.0.0.1:9100/plugins/update/${REQUEST.requestId}`,
+    ]);
+  });
+
+  it('recovers an ambiguous POST transport timeout only through the same UUID', async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new Error('request timeout'))
+      .mockResolvedValueOnce(jsonResponse(200, succeeded));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(triggerPluginUpdate(
+      '127.0.0.1', 9100, false, 'payara', REQUEST,
+    )).resolves.toMatchObject({ success: true });
+    expect(fetchMock.mock.calls[1]?.[0]).toBe(
+      `http://127.0.0.1:9100/plugins/update/${REQUEST.requestId}`
+    );
+  });
+
+  it('accepts an exact durable GET no-op without restart', async () => {
+    const noOpRequest = {
+      ...REQUEST,
+      expectedCurrentVersion: REQUEST.expectedVersion,
+    };
+    vi.stubGlobal('fetch', vi.fn()
+      .mockResolvedValueOnce(jsonResponse(202, {
+        ...pending,
+        previousVersion: REQUEST.expectedVersion,
+      }))
+      .mockResolvedValueOnce(jsonResponse(200, {
+        ...succeeded,
+        previousVersion: REQUEST.expectedVersion,
+        updated: 0,
+        willRestart: false,
+      })));
+
+    await expect(triggerPluginUpdate(
+      '127.0.0.1', 9100, false, 'payara', noOpRequest,
+    )).resolves.toMatchObject({
+      success: true,
+      response: { updated: 0, willRestart: false },
+    });
+  });
+
+  it('rejects an exact-looking terminal POST because only GET is durable evidence', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, succeeded));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(triggerPluginUpdate(
+      '127.0.0.1', 9100, false, 'payara', REQUEST,
+    )).resolves.toMatchObject({
+      success: false,
+      error: expect.stringContaining('durable GET receipt'),
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it.each([
     {
+      name: 'another request UUID',
+      response: { ...succeeded, requestId: '123e4567-e89b-42d3-b456-426614174000' },
+    },
+    {
       name: 'another plugin',
-      response: {
-        updated: 1,
-        willRestart: true,
-        results: [{ package: '@scope/other', previousVersion: '1.0.0', newVersion: '1.0.1', success: true }],
-      },
+      response: { ...succeeded, package: '@scope/other' },
     },
     {
-      name: 'wrong version',
-      response: {
-        updated: 1,
-        willRestart: true,
-        results: [{ package: '@zincapp/znvault-plugin-payara', previousVersion: '3.0.0', newVersion: '3.0.2', success: true }],
-      },
+      name: 'wrong installed version',
+      response: { ...succeeded, newVersion: '3.0.2' },
     },
     {
-      name: 'partial failure',
-      response: {
-        updated: 0,
-        willRestart: false,
-        results: [{ package: '@zincapp/znvault-plugin-payara', previousVersion: '3.0.0', newVersion: '3.0.1', success: false, error: 'install failed' }],
-      },
+      name: 'inconsistent restart claim',
+      response: { ...succeeded, willRestart: false },
     },
-  ])('fails closed for $name receipts', async ({ response }) => {
+    {
+      name: 'normalized but impossible receipt date',
+      response: { ...succeeded, finishedAt: '2026-02-30T01:00:02.000Z' },
+    },
+  ])('fails closed for $name success receipts', async ({ response }) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(200, response)));
 
     await expect(triggerPluginUpdate(
@@ -160,9 +260,30 @@ describe('triggerPluginUpdate exact receipt contract', () => {
       9100,
       false,
       'payara',
-      { package: '@zincapp/znvault-plugin-payara', expectedVersion: '3.0.1' },
+      REQUEST,
       undefined,
     )).resolves.toMatchObject({ success: false });
+  });
+
+  it('returns a correlated terminal helper failure without polling or restart', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(502, {
+      status: 'failed',
+      code: 'PLUGIN_INSTALL_FAILED',
+      error: 'root-owned install failed',
+      requestId: REQUEST.requestId,
+      package: REQUEST.package,
+      previousVersion: REQUEST.expectedCurrentVersion,
+      targetVersion: REQUEST.expectedVersion,
+      installedVersion: REQUEST.expectedCurrentVersion,
+      willRestart: false,
+      requestedAt,
+      startedAt,
+      finishedAt,
+    })));
+
+    await expect(triggerPluginUpdate(
+      '127.0.0.1', 9100, false, 'payara', REQUEST,
+    )).resolves.toEqual({ success: false, error: 'root-owned install failed' });
   });
 
   it('rejects an invalid exact update before network I/O', async () => {
@@ -174,10 +295,15 @@ describe('triggerPluginUpdate exact receipt contract', () => {
       9100,
       false,
       'payara',
-      { package: '', expectedVersion: 'not-semver' },
+      {
+        requestId: 'not-a-uuid',
+        package: '',
+        expectedCurrentVersion: 'range-or-tag',
+        expectedVersion: 'not-semver',
+      },
     )).resolves.toMatchObject({
       success: false,
-      error: expect.stringContaining('Exact plugin package'),
+      error: expect.stringContaining('Exact request UUID'),
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
