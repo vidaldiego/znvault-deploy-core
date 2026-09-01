@@ -18,7 +18,7 @@ payara-specific.
 | **Migration gate** | `runMigrationPhase` (parameterized over a plugin-supplied `runPhase` callback) |
 | **Quiesce** | `quiesceScheduler`, `resumeScheduler`, `schedulerStatus`, `pollUntilDrained` |
 | **Config store** | `loadDeployConfigs`, `saveDeployConfigs`, `getConfig`, `validateDeployConfig`, `resolveClass`, `partitionSelectedClasses` |
-| **Agent HTTP client** | `agentFetch`, `agentGet`, `agentPost`, `buildPluginUrl`, `setEndpointOverride`, `pollDeploymentStatus`, per-request Bearer auth, TLS helpers |
+| **Agent HTTP client** | `agentFetch`, `agentGet`, `agentPost`, `agentPostWithStatus`, `buildPluginUrl`, `createDeploymentId`, `DEPLOYMENT_ID_HEADER`, `setEndpointOverride`, `pollDeploymentStatus`, per-request Bearer auth, TLS helpers |
 | **Coverage/gates** | `computeNoFailures`, `computeFullCoverage`, `isScopedDeploy` |
 | **Output** | `UnifiedProgress`, `formatSize`, `formatDuration`, `progressBar`, … |
 
@@ -43,6 +43,13 @@ const auth = { bearerToken: tokenLoadedFromPrivateFile };
 await agentGet(`${pluginUrl}/status`, 10_000, auth);
 await agentPost(`${pluginUrl}/restart`, {}, 120_000, auth);
 ```
+
+Deployment recovery is correlated by an opaque operation identity rather than
+timestamps. Pass the same ID to `agentPostWithStatus` and
+`pollDeploymentStatus`; the status-aware POST injects it into its JSON object
+body and `DEPLOYMENT_ID_HEADER`, and rejects a mismatched payload locally. Use
+that header directly for binary uploads. Polling fails closed if the agent
+cannot prove the terminal receipt belongs to that exact operation.
 
 The library never loads, persists, or logs the token. Callers must read it from
 a private local file and keep the value out of command arguments, environment

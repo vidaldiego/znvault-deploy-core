@@ -199,6 +199,8 @@ export {
   agentPostWithStatus,
   agentPost,
   pollDeploymentStatus,
+  createDeploymentId,
+  DEPLOYMENT_ID_HEADER,
   setEndpointOverride,
   clearEndpointOverride,
   clearAllEndpointOverrides,

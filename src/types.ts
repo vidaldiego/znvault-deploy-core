@@ -457,6 +457,8 @@ export interface DeploymentStatusResponse {
   startedAt?: number;
   currentStep?: string;
   elapsedMs?: number;
+  /** Opaque identity associated with lastResult. */
+  lastDeploymentId?: string;
   lastResult?: DeployResult;
   lastCompletedAt?: number;
   appDeployed: boolean;
@@ -470,7 +472,14 @@ export interface DeploymentStatusResponse {
  */
 export type AgentPostResult<T> =
   | { ok: true; data: T }
-  | { ok: false; status: number; inProgress: boolean; error: string };
+  | {
+      ok: false;
+      status: number;
+      inProgress: boolean;
+      error: string;
+      /** Identity reported by a conflicting active deployment, when present. */
+      deploymentId?: string;
+    };
 
 /**
  * Result from checkHostReachable

@@ -6,6 +6,7 @@ import {
   agentPost,
   agentPostWithStatus,
   configureTLS,
+  createDeploymentId,
   pollDeploymentStatus,
 } from '../src/http-client.js';
 
@@ -78,12 +79,98 @@ describe('agentPost', () => {
       .toBe(`Bearer ${AUTH.bearerToken}`);
   });
 
+  it('treats a 409 as pollable only for the exact deployment identity', async () => {
+    const wallClock = vi.spyOn(Date, 'now')
+      .mockReturnValueOnce(Number.MAX_SAFE_INTEGER)
+      .mockReturnValue(Number.MIN_SAFE_INTEGER);
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: 'Deployment in progress',
+        deploymentId: 'operation-a',
+      }), { status: 409 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: 'Deployment in progress',
+        deploymentId: 'operation-a',
+      }), { status: 409 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(agentPostWithStatus(
+      'http://127.0.0.1/deploy',
+      {},
+      30_000,
+      AUTH,
+      'operation-a',
+    )).resolves.toMatchObject({
+      ok: false,
+      status: 409,
+      inProgress: true,
+      deploymentId: 'operation-a',
+    });
+
+    await expect(agentPostWithStatus(
+      'http://127.0.0.1/deploy',
+      {},
+      30_000,
+      AUTH,
+      'operation-b',
+    )).resolves.toMatchObject({
+      ok: false,
+      status: 409,
+      inProgress: false,
+      deploymentId: 'operation-a',
+    });
+    expect(wallClock).not.toHaveBeenCalled();
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers)
+      .get('x-znvault-deployment-id')).toBe('operation-a');
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)))
+      .toMatchObject({ deploymentId: 'operation-a' });
+  });
+
+  it('rejects a mismatched body and polling identity before sending the request', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(agentPostWithStatus(
+      'http://127.0.0.1/deploy',
+      { deploymentId: 'operation-a' },
+      30_000,
+      AUTH,
+      'operation-b',
+    )).resolves.toEqual({
+      ok: false,
+      status: 0,
+      inProgress: false,
+      error: 'Deployment identity in request body does not match the polling identity',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('requires a JSON object when deployment recovery is requested', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(agentPostWithStatus(
+      'http://127.0.0.1/deploy',
+      'not-an-object',
+      30_000,
+      AUTH,
+      'operation-a',
+    )).resolves.toEqual({
+      ok: false,
+      status: 0,
+      inProgress: false,
+      error: 'A deployment identity requires a JSON object request body',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('retains bearer authorization while polling deployment status', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
         deploying: false,
-        lastCompletedAt: 200,
+        lastCompletedAt: 1,
+        lastDeploymentId: 'operation-a',
         lastResult: { success: true, message: 'done' },
       }),
     });
@@ -91,7 +178,7 @@ describe('agentPost', () => {
 
     const result = await pollDeploymentStatus(
       'http://127.0.0.1/plugins/payara',
-      100,
+      'operation-a',
       { waitingForDeployment: vi.fn() },
       1_000,
       AUTH,
@@ -100,6 +187,104 @@ describe('agentPost', () => {
     expect(result.success).toBe(true);
     expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get('Authorization'))
       .toBe(`Bearer ${AUTH.bearerToken}`);
+  });
+
+  it('keeps the legacy timestamp signature source-compatible but fails closed', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(pollDeploymentStatus(
+      'http://127.0.0.1/plugins/payara',
+      Date.now(),
+      { waitingForDeployment: vi.fn() },
+      1_000,
+      AUTH,
+    )).resolves.toEqual({
+      success: false,
+      error: 'Deployment operation identity is required; timestamp polling is unsafe',
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not accept another operation result even when its timestamp is newer', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        deploying: true,
+        deploymentId: 'operation-b',
+        lastDeploymentId: 'operation-b',
+        lastCompletedAt: Number.MAX_SAFE_INTEGER,
+        lastResult: { success: true, message: 'other deployment' },
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(pollDeploymentStatus(
+      'http://127.0.0.1/plugins/payara',
+      'operation-a',
+      { waitingForDeployment: vi.fn() },
+      1_000,
+      AUTH,
+    )).resolves.toEqual({
+      success: false,
+      error: 'A different deployment is in progress; refusing to use its result',
+    });
+  });
+
+  it('fails closed when a later terminal receipt overwrote this operation', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        deploying: false,
+        lastDeploymentId: 'operation-b',
+        lastCompletedAt: Number.MAX_SAFE_INTEGER,
+        lastResult: { success: true, message: 'later deployment' },
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(pollDeploymentStatus(
+      'http://127.0.0.1/plugins/payara',
+      'operation-a',
+      { waitingForDeployment: vi.fn() },
+      5,
+      AUTH,
+    )).resolves.toEqual({
+      success: false,
+      error: 'Timed out waiting for deployment to complete',
+    });
+  });
+
+  it('matches by identity despite arbitrary client/server clock skew', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        deploying: false,
+        lastDeploymentId: 'operation-a',
+        lastCompletedAt: 1,
+        lastResult: { success: false, message: 'exact failure' },
+      }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(pollDeploymentStatus(
+      'http://127.0.0.1/plugins/payara',
+      'operation-a',
+      { waitingForDeployment: vi.fn() },
+      1_000,
+      AUTH,
+    )).resolves.toMatchObject({
+      success: false,
+      error: 'exact failure',
+      result: { success: false },
+    });
+  });
+
+  it('generates distinct opaque deployment identities', () => {
+    const first = createDeploymentId();
+    const second = createDeploymentId();
+    expect(first).not.toBe(second);
+    expect(first).toMatch(/^[0-9a-f-]{36}$/);
   });
 
   it('does not cross per-host credentials during concurrent requests', async () => {

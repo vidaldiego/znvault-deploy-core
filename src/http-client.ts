@@ -10,7 +10,16 @@ import {
 } from './constants.js';
 import { getErrorMessage } from './utils/error.js';
 import { readFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { Agent as UndiciAgent } from 'undici';
+
+/** Stable wire name used to correlate binary deployment requests. */
+export const DEPLOYMENT_ID_HEADER = 'x-znvault-deployment-id';
+
+/** Create an opaque identifier for exactly one deployment mutation. */
+export function createDeploymentId(): string {
+  return randomUUID();
+}
 
 /**
  * TLS configuration for HTTPS connections
@@ -269,16 +278,41 @@ export async function agentPostWithStatus<T>(
   url: string,
   body: unknown,
   timeout = DEPLOYMENT_TIMEOUT_MS,
-  auth?: AgentRequestAuth
+  auth?: AgentRequestAuth,
+  deploymentId?: string
 ): Promise<AgentPostResult<T>> {
+  let requestBody = body;
+  if (deploymentId !== undefined) {
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      return {
+        ok: false,
+        status: 0,
+        inProgress: false,
+        error: 'A deployment identity requires a JSON object request body',
+      };
+    }
+
+    const submittedDeploymentId = (body as { deploymentId?: unknown }).deploymentId;
+    if (submittedDeploymentId !== undefined && submittedDeploymentId !== deploymentId) {
+      return {
+        ok: false,
+        status: 0,
+        inProgress: false,
+        error: 'Deployment identity in request body does not match the polling identity',
+      };
+    }
+    requestBody = { ...body, deploymentId };
+  }
+
   try {
     const options = getFetchOptions(url, {
       method: 'POST',
       headers: getAgentHeaders(url, {
         'Content-Type': 'application/json',
         'Accept': 'application/json',
+        ...(deploymentId ? { [DEPLOYMENT_ID_HEADER]: deploymentId } : {}),
       }, auth),
-      body: JSON.stringify(body),
+      body: JSON.stringify(requestBody),
       signal: AbortSignal.timeout(timeout),
       redirect: 'error',
     });
@@ -289,10 +323,32 @@ export async function agentPostWithStatus<T>(
       return { ok: true, data };
     }
 
-    // Handle 409 "Deployment in progress" specially
+    // A 409 is pollable only when the server proves that the operation already
+    // running is the exact operation this caller submitted. Treating another
+    // deployment's conflict as our own in-progress request can manufacture a
+    // false success receipt.
     if (response.status === 409) {
       const text = await response.text();
-      return { ok: false, status: 409, inProgress: true, error: text };
+      let activeDeploymentId: string | undefined;
+      try {
+        const parsed = JSON.parse(text) as { deploymentId?: unknown };
+        if (typeof parsed.deploymentId === 'string') {
+          activeDeploymentId = parsed.deploymentId;
+        }
+      } catch {
+        // Preserve the server response below; an unparseable conflict is not
+        // safe to poll.
+      }
+      return {
+        ok: false,
+        status: 409,
+        inProgress:
+          deploymentId !== undefined
+          && activeDeploymentId !== undefined
+          && activeDeploymentId === deploymentId,
+        error: text,
+        ...(activeDeploymentId ? { deploymentId: activeDeploymentId } : {}),
+      };
     }
 
     const text = await response.text();
@@ -301,7 +357,14 @@ export async function agentPostWithStatus<T>(
     // Timeout or network error
     const message = getErrorMessage(err);
     const isTimeout = message.includes('timeout') || message.includes('aborted');
-    return { ok: false, status: 0, inProgress: isTimeout, error: message };
+    return {
+      ok: false,
+      status: 0,
+      // A timeout is recoverable only when the caller supplied an identity that
+      // can be matched against the server's terminal receipt.
+      inProgress: isTimeout && deploymentId !== undefined,
+      error: message,
+    };
   }
 }
 
@@ -345,14 +408,23 @@ export interface ProgressCallback {
  */
 export async function pollDeploymentStatus(
   pluginUrl: string,
-  startedAfter: number,
+  deploymentId: string | number,
   progress: ProgressCallback,
   maxWaitMs = STATUS_POLL_MAX_WAIT_MS,
   auth?: AgentRequestAuth
 ): Promise<{ success: boolean; result?: DeployResult; error?: string }> {
-  const pollStart = Date.now();
+  // Preserve source compatibility for callers compiled against the former
+  // timestamp parameter, but never infer ownership from a wall-clock value.
+  if (typeof deploymentId !== 'string') {
+    return {
+      success: false,
+      error: 'Deployment operation identity is required; timestamp polling is unsafe',
+    };
+  }
 
-  while (Date.now() - pollStart < maxWaitMs) {
+  const pollStart = performance.now();
+
+  while (performance.now() - pollStart < maxWaitMs) {
     try {
       const status = await agentGet<DeploymentStatusResponse>(
         `${pluginUrl}/deploy/status`,
@@ -360,8 +432,14 @@ export async function pollDeploymentStatus(
         auth
       );
 
-      // Check if deployment completed after our request started
-      if (status.lastCompletedAt && status.lastCompletedAt > startedAfter) {
+      // A currently active request with the same ID takes precedence over an
+      // older terminal receipt carrying a reused ID. Otherwise a terminal
+      // result belongs to this caller only when its opaque identity matches
+      // exactly. Wall clocks are deliberately irrelevant.
+      if (status.deploying && status.deploymentId === deploymentId) {
+        const elapsed = Math.round((performance.now() - pollStart) / 1000);
+        progress.waitingForDeployment(elapsed, status.currentStep);
+      } else if (status.lastDeploymentId === deploymentId) {
         if (status.lastResult?.success) {
           return { success: true, result: status.lastResult };
         } else {
@@ -371,21 +449,33 @@ export async function pollDeploymentStatus(
             result: status.lastResult,
           };
         }
+      } else if (status.deploying) {
+        return {
+          success: false,
+          error: 'A different deployment is in progress; refusing to use its result',
+        };
+      } else if (
+        status.deploymentId === undefined
+        && status.lastDeploymentId === undefined
+      ) {
+        return {
+          success: false,
+          error: 'Deployment status does not expose operation identity; completion cannot be verified safely',
+        };
       }
+      // NOTE: appDeployed/healthy and timestamps are observational only. They
+      // must never be converted into a receipt for this operation.
 
-      // Still deploying - show progress
-      if (status.deploying) {
-        const elapsed = Math.round((Date.now() - pollStart) / 1000);
-        progress.waitingForDeployment(elapsed, status.currentStep);
+      const remaining = maxWaitMs - (performance.now() - pollStart);
+      if (remaining > 0) {
+        await new Promise(r => setTimeout(r, Math.min(STATUS_POLL_INTERVAL_MS, remaining)));
       }
-      // NOTE: We intentionally do NOT return early based on appDeployed && healthy
-      // because that could be from a PREVIOUS deployment. We MUST wait for
-      // lastCompletedAt > startedAfter to confirm THIS deployment finished.
-
-      await new Promise(r => setTimeout(r, STATUS_POLL_INTERVAL_MS));
     } catch {
       // Status check failed - server might be restarting, keep polling
-      await new Promise(r => setTimeout(r, STATUS_POLL_INTERVAL_MS));
+      const remaining = maxWaitMs - (performance.now() - pollStart);
+      if (remaining > 0) {
+        await new Promise(r => setTimeout(r, Math.min(STATUS_POLL_INTERVAL_MS, remaining)));
+      }
     }
   }
 
