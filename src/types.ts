@@ -289,9 +289,21 @@ export interface SharedDeployDefaults {
  * One node class within a multi-class deploy. IS a SharedDeployDefaults (every
  * field overridable) plus the fields intrinsic to a class.
  */
+/** Dedicated final Docker target. No production agent, database or secret fields are inherited. */
+export interface SandboxDeployTarget {
+  kind: 'partner-sandbox-compose';
+  runtimeId: string;
+  host: string;
+  project: string;
+  directory: string;
+  manifestPath: string;
+  ssh: { user: string };
+}
+
 export type DeployClass = SharedDeployDefaults & {
   /** 'api' | 'worker' | 'ai' — unique within the config. */
   name: string;
+  target?: SandboxDeployTarget;
   /** Hosts in this class. Every physical host must be unique across the whole config. */
   hosts: string[];
   /**

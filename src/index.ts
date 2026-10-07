@@ -21,6 +21,7 @@ export type {
   QuiesceConfig,
   SharedDeployDefaults,
   DeployClass,
+  SandboxDeployTarget,
   DeployConfig,
   MigrationConfig,
   DeployConfigStore,

@@ -73,6 +73,7 @@ export function resolveConfigPaths(config: DeployConfig): DeployConfig {
 
   if (Array.isArray(config.classes)) {
     out.classes = config.classes.map((c) => {
+      if (c.target) return { ...c, target: { ...c.target, manifestPath: resolveConfigPath(c.target.manifestPath, root)! } };
       const cw = resolveConfigPath(c.warPath, root);
       return cw !== undefined ? { ...c, warPath: cw } : { ...c };
     });

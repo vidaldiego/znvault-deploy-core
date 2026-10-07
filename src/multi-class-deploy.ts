@@ -132,6 +132,11 @@ export async function executeMultiClassDeployment(
   let aborted = false;
 
   for (const rc of resolvedClasses) {
+    if(rc.target && !aborted) {
+      const incomplete=result.classes.find(outcome=> !outcome.ran || outcome.coverageOk!==true || !outcome.ctx ||
+        classGateFailed(outcome.ctx) || outcome.ctx.workerFailed>0);
+      if(incomplete) { aborted=true; result.abortedAt=incomplete.name; }
+    }
     if (aborted) {
       result.classes.push({ name: rc.name, blocking: rc.blocking, ran: false, skippedReason: 'upstream-abort' });
       continue;

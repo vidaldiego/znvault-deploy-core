@@ -74,6 +74,7 @@ export function validateDeployConfig(config: DeployConfig): ValidationReport {
   ];
   if (Array.isArray(config.classes)) {
     for (const c of config.classes) {
+      if (c.target) localFields.push({label: `classes[${c.name}].target.manifestPath`, value:c.target.manifestPath});
       if (c.warPath !== undefined) localFields.push({ label: `classes[${c.name}].warPath`, value: c.warPath });
     }
   }
@@ -133,6 +134,19 @@ export function validateDeployConfig(config: DeployConfig): ValidationReport {
       for (const c of classes) {
         const r = resolveClass(config, c);
 
+        if(c.target) {
+          const t=c.target;
+          if(t.kind!=='partner-sandbox-compose' || t.runtimeId!=='partner-sandbox' || t.host!=='172.16.221.80' ||
+            t.project!=='zincapp-partner-sandbox' || t.directory!=='/srv/zincapp/partner-sandbox') errors.push(`class '${c.name}' has invalid sandbox target ownership.`);
+          if(classes[classes.length-1]!==c || classes.filter(x=>x.target).length!==1) errors.push('The sandbox must be the single final deployment target.');
+          if(c.hosts.length!==1 || c.hosts[0]!==t.host || c.blocking===false) errors.push(`class '${c.name}' requires one fixed blocking sandbox host.`);
+          if(Object.entries(c).some(([key,value])=> !['name','hosts','target','blocking'].includes(key) && value!==undefined)) errors.push(`class '${c.name}' cannot mix serving or agent controls with a Docker target.`);
+          if(Object.keys(t).some(key=>!['kind','runtimeId','host','project','directory','manifestPath','ssh'].includes(key))) errors.push(`class '${c.name}' has unknown sandbox target fields.`);
+          if(!t.manifestPath || (!hasRoot && isRelativeAfterTilde(t.manifestPath))) errors.push(`class '${c.name}' requires a root-anchored sandbox artifact manifest.`);
+          if(!t.ssh || Object.keys(t.ssh).some(key=>key!=='user') || typeof t.ssh.user!=='string' || !/^[a-z_][a-z0-9_-]{0,31}$/.test(t.ssh.user)) errors.push(`class '${c.name}' requires an explicit safe SSH user.`);
+          info.push(`class '${c.name}' is the final isolated Compose phase; its own migration database is partner_sandbox_zincdb.`);
+          continue;
+        }
         // Resolved warPath/port
         if (!r.warPath) errors.push(`class '${c.name}' resolves no warPath (set it on the class or the config).`);
         if (r.port === undefined) errors.push(`class '${c.name}' resolves no port.`);

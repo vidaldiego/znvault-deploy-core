@@ -18,6 +18,7 @@ export function hasActiveServerMap(haproxy?: HAProxyConfig): boolean {
  * wholesale (no deep-merge). quiesce/hostConfigs do NOT inherit (per-class only).
  */
 export function resolveClass(base: DeployConfig, cls: DeployClass): ResolvedClass {
+  if (cls.target) return { name: cls.name, hosts: cls.hosts, target: { ...cls.target, ssh: { ...cls.target.ssh } }, blocking: true };
   const pick = <T>(c: T | undefined, b: T | undefined): T | undefined => (c !== undefined ? c : b);
 
   const resolved: ResolvedClass = {
