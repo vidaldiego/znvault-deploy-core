@@ -80,3 +80,7 @@ so consumers need `@zincapp/znvault-cli` ≥ 4.5.0 (declared as an optional
 peer because non-tunnel consumers can inject or avoid that capability).
 Publishes to npm with provenance via OIDC trusted publishing on a `v*` tag
 push.
+
+Core 0.2 and 0.3 releases stay on the isolated `dr-m4` npm channel. The
+partner sandbox target in 0.3 does not promote the production fleet channel;
+publication leaves the legacy `latest` dist-tag unchanged.

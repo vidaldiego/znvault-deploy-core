@@ -76,7 +76,7 @@ jobs:
           set -euo pipefail
           package_version="$(node -p "require('./package.json').version")"
           case "${package_version}" in
-            0.2.*)
+            0.2.*|0.3.*)
               echo "dist_tag=dr-m4" >> "${GITHUB_OUTPUT}"
               echo "make_latest=false" >> "${GITHUB_OUTPUT}"
               ;;
